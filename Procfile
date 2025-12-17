@@ -1,1 +1,1 @@
-web: streamlit run main.py --server.port $PORT --server.address 0.0.0.0
+web: python render_bootstrap.py
