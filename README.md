@@ -13,6 +13,8 @@ These launchers create a dedicated virtual environment, install dependencies fro
 
 To launch the PS Business Suites by ZAD sales experience instead of the service CRM, set `PS_APP=sales` (or `PS_APP_SCRIPT=sales_app.py` when using the desktop launcher) before starting the application. The same unified requirements file and Procfile work for both apps on Render or Railway.
 
+On hosting platforms that expect a Python entry point (such as Railway or Render), set the start command to `python render_bootstrap.py`. The bootstrapper mirrors the Procfile settings, respects the `PS_APP`/`PS_APP_SCRIPT` toggle, and will default to a persistent volume (for example `/data`) when one is available. The repository `Procfile` already uses the bootstrapper so you can leave the default command in place on Railway/Render deployments.
+
 ### Any Platform (single command or double-click)
 Run `python run_app.py` from the repository root, or double-click the file in your file explorer. The script prepares the environment and launches the app inside a pywebview dialog titled **PS Business Suites**.
 
