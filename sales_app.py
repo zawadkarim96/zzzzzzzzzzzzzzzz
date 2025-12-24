@@ -35,6 +35,7 @@ from ps_sales import (
     Database,
     load_config,
 )
+from backup_utils import ensure_monthly_backup, get_backup_status
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,8 @@ USER_REPOSITORY = UserRepository(DATABASE)
 PASSWORD_SERVICE = PasswordService.default()
 LOCKOUT_SERVICE = AccountLockoutService(CONFIG, USER_REPOSITORY)
 UPLOAD_MANAGER = UploadManager(CONFIG)
+BACKUP_DIR = CONFIG.data_dir / "backups"
+BACKUP_RETENTION_COUNT = int(os.getenv("PS_SALES_BACKUP_RETENTION", "12"))
 
 
 DEFAULT_QUOTATION_STATUSES: Tuple[str, ...] = (
@@ -2224,6 +2227,8 @@ def build_full_archive(excel_bytes: Optional[bytes] = None) -> bytes:
     return archive_buffer.getvalue()
 
 
+
+
 def get_settings() -> Dict[str, int]:
     with get_conn() as conn:
         cur = conn.execute("SELECT key, value FROM settings")
@@ -3211,6 +3216,18 @@ def render_dashboard(user: Dict) -> None:
                 data=archive_data,
                 file_name="ps_sales_full_export.rar",
                 mime="application/octet-stream",
+            )
+        backup_status = get_backup_status(BACKUP_DIR)
+        if backup_status:
+            backup_label = backup_status.get("last_backup_at") or "Unknown time"
+            backup_file = backup_status.get("last_backup_file") or "unknown file"
+            st.caption(
+                f"Last automatic backup: {backup_label} • {backup_file} "
+                f"(stored in {backup_status.get('backup_dir')})"
+            )
+        if st.session_state.get("auto_backup_error"):
+            st.warning(
+                f"Automatic backup failed: {st.session_state['auto_backup_error']}"
             )
     counts = quotation_metrics(user)
     followups = follow_up_overview(user)
@@ -5721,6 +5738,13 @@ def render_settings() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="PS Business Suites by ZAD", layout="wide")
+    _, backup_error = ensure_monthly_backup(
+        BACKUP_DIR,
+        "ps_sales_backup",
+        build_full_archive,
+        BACKUP_RETENTION_COUNT,
+    )
+    st.session_state["auto_backup_error"] = backup_error
     if "user" not in st.session_state:
         login_screen()
         return
