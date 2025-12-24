@@ -29,6 +29,8 @@ from pypdf import PdfReader
 
 from openpyxl import load_workbook
 
+from backup_utils import ensure_monthly_backup, get_backup_status
+
 
 import streamlit as st
 from streamlit.components.v1 import html as st_components_html
@@ -62,6 +64,8 @@ DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "ps_crm.db"))
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATE_FMT = "%d-%m-%Y"
 CURRENCY_SYMBOL = os.getenv("APP_CURRENCY_SYMBOL", "৳")
+BACKUP_DIR = BASE_DIR / "backups"
+BACKUP_RETENTION_COUNT = int(os.getenv("PS_CRM_BACKUP_RETENTION", "12"))
 
 UPLOADS_DIR = BASE_DIR / "uploads"
 DELIVERY_ORDER_DIR = UPLOADS_DIR / "delivery_orders"
@@ -3931,6 +3935,8 @@ def export_full_archive(
     return buffer.getvalue()
 
 
+
+
 def fetch_warranty_window(conn, start_days: int, end_days: int) -> pd.DataFrame:
     scope_clause, scope_params = customer_scope_filter("c")
     filters = [
@@ -5352,6 +5358,18 @@ def dashboard(conn):
                 file_name="ps_crm_full.rar",
                 mime="application/x-rar-compressed",
                 help="Bundles the database, uploads, and receipts into one portable file.",
+            )
+        backup_status = get_backup_status(BACKUP_DIR)
+        if backup_status:
+            backup_label = backup_status.get("last_backup_at") or "Unknown time"
+            backup_file = backup_status.get("last_backup_file") or "unknown file"
+            st.caption(
+                f"Last automatic backup: {backup_label} • {backup_file} "
+                f"(stored in {backup_status.get('backup_dir')})"
+            )
+        if st.session_state.get("auto_backup_error"):
+            st.warning(
+                f"Automatic backup failed: {st.session_state['auto_backup_error']}"
             )
 
         toggle_label = (
@@ -14714,6 +14732,13 @@ def main():
     _ensure_quotation_editor_server()
     conn = get_conn()
     init_schema(conn)
+    _, backup_error = ensure_monthly_backup(
+        BACKUP_DIR,
+        "ps_crm_backup",
+        lambda: export_full_archive(conn),
+        BACKUP_RETENTION_COUNT,
+    )
+    st.session_state["auto_backup_error"] = backup_error
     login_box(conn, render_id=render_id)
 
     if "page" not in st.session_state:

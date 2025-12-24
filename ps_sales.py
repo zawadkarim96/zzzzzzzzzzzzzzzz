@@ -13,7 +13,7 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 import secrets
@@ -227,7 +227,9 @@ class AccountLockoutService:
             )
 
     def is_locked(self, username: str) -> Optional[datetime]:
-        cutoff = datetime.utcnow() - timedelta(minutes=self.config.login_lockout_minutes)
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=self.config.login_lockout_minutes
+        )
         with self.db.begin() as conn:
             rows = conn.execute(
                 "SELECT occurred_at FROM login_events "
@@ -238,7 +240,9 @@ class AccountLockoutService:
         if len(rows) < self.config.login_max_attempts:
             return None
         try:
-            newest = datetime.strptime(rows[0]["occurred_at"], "%Y-%m-%d %H:%M:%S")
+            newest = datetime.strptime(
+                rows[0]["occurred_at"], "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
         except Exception:
             return None
         if newest < cutoff:
