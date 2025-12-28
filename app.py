@@ -4150,10 +4150,19 @@ def apply_theme_css() -> None:
         }}
         [data-testid="stDataFrame"],
         [data-testid="stDataEditor"] {{
-            background-color: var(--ps-panel-bg);
-            color: var(--ps-text);
-            border: 1px solid var(--ps-panel-border);
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border: 1px solid var(--ps-panel-border) !important;
             border-radius: 0.65rem;
+        }}
+        [data-testid="stDataFrame"] [data-baseweb="table"] > div,
+        [data-testid="stDataFrame"] [data-baseweb="table"] [role="rowgroup"],
+        [data-testid="stDataFrame"] [data-baseweb="table"] [role="grid"],
+        [data-testid="stDataEditor"] [data-baseweb="table"] > div,
+        [data-testid="stDataEditor"] [data-baseweb="table"] [role="rowgroup"],
+        [data-testid="stDataEditor"] [data-baseweb="table"] [role="grid"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
         }}
         [data-testid="stDataFrame"] table,
         [data-testid="stDataEditor"] table,
@@ -4231,7 +4240,7 @@ def apply_theme_css() -> None:
         }}
         [data-testid="stTable"] {{
             background-color: var(--ps-panel-bg) !important;
-            border: 1px solid var(--ps-panel-border);
+            border: 1px solid var(--ps-panel-border) !important;
             border-radius: 0.65rem;
             overflow: hidden;
         }}
@@ -4264,6 +4273,26 @@ def apply_theme_css() -> None:
         }}
         [data-testid="stMarkdownContainer"] th {{
             background-color: var(--ps-table-header-bg) !important;
+        }}
+        table {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        table th,
+        table td {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        table tbody tr {{
+            background-color: var(--ps-panel-bg) !important;
+        }}
+        table thead th {{
+            background-color: var(--ps-table-header-bg) !important;
+        }}
+        table tbody tr:nth-child(even) {{
+            background-color: var(--ps-table-row-alt-bg) !important;
         }}
         [data-testid="stFileUploader"] section {{
             background-color: var(--ps-panel-bg) !important;
@@ -5124,33 +5153,44 @@ def login_box(conn, *, render_id=None):
             box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
         }}
         div[data-testid="stForm"] h3 {{
-            color: {panel_text};
+            color: {panel_text} !important;
         }}
         div[data-testid="stForm"] label {{
-            color: {panel_text};
+            color: {panel_text} !important;
+        }}
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] p,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] span,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] li,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h1,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h2,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h3,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h4,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h5,
+        div[data-testid="stForm"] [data-testid="stMarkdownContainer"] h6 {{
+            color: {panel_text} !important;
         }}
         div[data-testid="stForm"] input {{
             background-color: {input_bg};
-            color: {panel_text};
+            color: {panel_text} !important;
             border: 1px solid {input_border};
         }}
         div[data-testid="stForm"] input::placeholder {{
-            color: {placeholder_color};
+            color: {placeholder_color} !important;
         }}
         div[data-testid="stForm"] button {{
             background: {button_bg};
-            color: {button_text};
+            color: {button_text} !important;
             border: 1px solid {input_border};
         }}
         div[data-testid="stForm"] button span {{
-            color: {button_text};
+            color: {button_text} !important;
         }}
         div[data-testid="stForm"] button:hover {{
             background: {button_hover};
-            color: {button_text};
+            color: {button_text} !important;
         }}
         div[data-testid="stForm"] button:hover span {{
-            color: {button_text};
+            color: {button_text} !important;
         }}
         div[data-testid="stForm"] [data-baseweb="input"] button {{
             background-color: transparent !important;
