@@ -3945,10 +3945,40 @@ def apply_theme_css() -> None:
         [data-testid="stTextInput"] input,
         [data-testid="stTextArea"] textarea,
         [data-testid="stDateInput"] input,
-        [data-testid="stNumberInput"] input {{
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTimeInput"] input {{
             background-color: var(--ps-input-bg);
             border-color: var(--ps-input-border);
             color: var(--ps-text);
+        }}
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] > div {{
+            background-color: var(--ps-input-bg);
+            border-color: var(--ps-input-border);
+            color: var(--ps-text);
+        }}
+        [data-testid="stSelectbox"] [data-baseweb="select"] input,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] input {{
+            color: var(--ps-text);
+        }}
+        [data-testid="stSelectbox"] [data-baseweb="select"] svg,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] svg {{
+            color: var(--ps-muted);
+            fill: var(--ps-muted);
+        }}
+        [data-testid="stSelectbox"] [role="listbox"],
+        [data-testid="stMultiSelect"] [role="listbox"] {{
+            background-color: var(--ps-panel-bg);
+            color: var(--ps-text);
+            border-color: var(--ps-panel-border);
+        }}
+        [data-testid="stSelectbox"] [role="option"],
+        [data-testid="stMultiSelect"] [role="option"] {{
+            color: var(--ps-text);
+        }}
+        [data-testid="stSelectbox"] [role="option"][aria-selected="true"],
+        [data-testid="stMultiSelect"] [role="option"][aria-selected="true"] {{
+            background-color: rgba(56, 189, 248, 0.18);
         }}
         [data-testid="stMarkdownContainer"] p,
         [data-testid="stMarkdownContainer"] span,
