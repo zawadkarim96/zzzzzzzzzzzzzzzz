@@ -4120,6 +4120,21 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             fill: var(--ps-text) !important;
         }}
+        [data-baseweb="tooltip"] > div,
+        [data-baseweb="tooltip"] [role="tooltip"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border: 1px solid var(--ps-panel-border) !important;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+        }}
+        [data-baseweb="tooltip"] p,
+        [data-baseweb="tooltip"] span,
+        [data-baseweb="tooltip"] li {{
+            color: var(--ps-text) !important;
+        }}
+        [data-baseweb="tooltip"] svg {{
+            fill: var(--ps-text) !important;
+        }}
         [data-testid="stVegaLiteChart"] svg,
         [data-testid="stVegaLiteChart"] canvas {{
             background-color: var(--ps-panel-bg) !important;
@@ -4919,11 +4934,15 @@ def login_box(conn, *, render_id=None):
             )
         except OSError:
             cover_css = ""
-    panel_bg = "#ffffff" if get_theme() == "light" else "#0f172a"
-    panel_text = "#111827" if get_theme() == "light" else "#f8fafc"
-    input_bg = "#f1f5fb" if get_theme() == "light" else "#1f2937"
-    input_border = "#d6deea" if get_theme() == "light" else "#334155"
-    placeholder_color = "rgba(75, 85, 99, 0.9)" if get_theme() == "light" else "rgba(148, 163, 184, 0.9)"
+    theme = get_theme()
+    panel_bg = "#ffffff" if theme == "light" else "#0f172a"
+    panel_text = "#111827" if theme == "light" else "#f8fafc"
+    input_bg = "#f1f5fb" if theme == "light" else "#1f2937"
+    input_border = "#d6deea" if theme == "light" else "#334155"
+    placeholder_color = "rgba(75, 85, 99, 0.9)" if theme == "light" else "rgba(148, 163, 184, 0.9)"
+    button_bg = "#1d3b64" if theme == "light" else "#111827"
+    button_text = "#ffffff" if theme == "light" else "#f9fafb"
+    button_hover = "#1e4b82" if theme == "light" else "#0f172a"
     st.markdown(
         f"""
         <style>
@@ -4971,13 +4990,16 @@ def login_box(conn, *, render_id=None):
             color: {placeholder_color};
         }}
         div[data-testid="stForm"] button {{
-            background: #111827;
-            color: #f9fafb;
+            background: {button_bg};
+            color: {button_text};
             border: none;
         }}
+        div[data-testid="stForm"] button span {{
+            color: {button_text};
+        }}
         div[data-testid="stForm"] button:hover {{
-            background: #0f172a;
-            color: #f9fafb;
+            background: {button_hover};
+            color: {button_text};
         }}
         </style>
         """,
