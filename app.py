@@ -4572,6 +4572,18 @@ def init_ui():
     if st.session_state.user:
         st.title("PS Engineering – Business Suites")
         st.caption("Customers • Warranties • Needs • Summaries")
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stToolbar"],
+            div[data-testid="stStatusWidget"],
+            div[data-testid="stDecoration"] {
+                display: none !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
     st.markdown(
         """
         <style>
@@ -4647,8 +4659,11 @@ def login_box(conn, *, render_id=None):
             )
         except OSError:
             cover_css = ""
-    panel_bg = "rgba(255, 255, 255, 0.88)" if get_theme() == "light" else "rgba(18, 22, 32, 0.85)"
-    panel_text = "#111" if get_theme() == "light" else "#f5f5f5"
+    panel_bg = "#ffffff" if get_theme() == "light" else "#0f172a"
+    panel_text = "#111827" if get_theme() == "light" else "#f8fafc"
+    input_bg = "#f1f5fb" if get_theme() == "light" else "#1f2937"
+    input_border = "#d6deea" if get_theme() == "light" else "#334155"
+    placeholder_color = "rgba(75, 85, 99, 0.9)" if get_theme() == "light" else "rgba(148, 163, 184, 0.9)"
     st.markdown(
         f"""
         <style>
@@ -4670,7 +4685,7 @@ def login_box(conn, *, render_id=None):
             background-repeat: no-repeat;
         }}
         section.main > div {{
-            padding-top: 3rem;
+            padding-top: 5rem;
         }}
         div[data-testid="stForm"] {{
             background: {panel_bg};
@@ -4678,22 +4693,24 @@ def login_box(conn, *, render_id=None):
             padding: 1.75rem 2rem;
             border-radius: 18px;
             max-width: 420px;
-            margin: 2rem auto 0 auto;
+            margin: 4rem auto 0 auto;
             box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+        }}
+        div[data-testid="stForm"] label {{
+            color: {panel_text};
+        }}
+        div[data-testid="stForm"] input {{
+            background-color: {input_bg};
+            color: {panel_text};
+            border: 1px solid {input_border};
+        }}
+        div[data-testid="stForm"] input::placeholder {{
+            color: {placeholder_color};
         }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-    toggle_cols = st.columns([1, 1, 1])
-    with toggle_cols[2]:
-        login_dark = st.toggle(
-            "Dark mode",
-            value=get_theme() == "dark",
-            key="login_theme_toggle",
-        )
-    set_theme(login_dark)
-    apply_theme_css()
     with st.form("login_form"):
         st.markdown("### Welcome back")
         u = st.text_input("Username")
