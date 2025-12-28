@@ -4222,8 +4222,11 @@ def recalc_customer_duplicate_flag(conn, phone):
 
 def init_ui():
     st.set_page_config(page_title="PS Business Suites", page_icon="🧰", layout="wide")
-    st.title("PS Engineering – Business Suites")
-    st.caption("Customers • Warranties • Needs • Summaries")
+    if "user" not in st.session_state:
+        st.session_state.user = None
+    if st.session_state.user:
+        st.title("PS Engineering – Business Suites")
+        st.caption("Customers • Warranties • Needs • Summaries")
     st.markdown(
         """
         <style>
@@ -4263,20 +4266,49 @@ def init_ui():
         """,
         unsafe_allow_html=True,
     )
-    if "user" not in st.session_state:
-        st.session_state.user = None
-
 # ---------- Auth ----------
 def login_box(conn, *, render_id=None):
     logout_button_key = f"sidebar_logout_main_{render_id or st.session_state.get('_render_id', 0)}"
-    st.sidebar.markdown("### Login")
     if st.session_state.user:
+        st.sidebar.markdown("### Login")
         st.sidebar.success(f"Logged in as {st.session_state.user['username']} ({st.session_state.user['role']})")
         if st.sidebar.button("Logout", key=logout_button_key):
-            st.session_state.user = None
-            st.session_state.page = "Dashboard"
-            _safe_rerun()
+            # Ensure logout clears full session so auth gate can block dashboard.
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
         return True
+    # Hide Streamlit chrome on the login screen (auth gate UI only).
+    st.set_option("client.toolbarMode", "viewer")
+    st.markdown(
+        """
+        <style>
+        #MainMenu,
+        header,
+        footer,
+        div[data-testid="stToolbar"],
+        div[data-testid="stStatusWidget"],
+        div[data-testid="stDecoration"] {
+            display: none !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.toggle("Dark mode", key="login_theme_toggle")
+    if st.session_state.get("login_theme_toggle"):
+        st.markdown(
+            """
+            <style>
+            [data-testid="stAppViewContainer"],
+            [data-testid="stSidebar"] {
+                background-color: #0e1117;
+                color: #fafafa;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
     with st.sidebar.form("login_form"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -5342,33 +5374,42 @@ def dashboard(conn):
             st.session_state.show_deleted_panel = False
 
         export_state = st.session_state.setdefault("admin_export_state", {})
-        if st.button("Prepare downloads", use_container_width=True):
+        downloads_enabled = st.checkbox(
+            "Enable admin downloads",
+            key="admin_downloads_enabled",
+        )
+        if downloads_enabled and st.button("Prepare downloads", use_container_width=True):
+            # Generate admin export bytes only on explicit request (IDM-safe).
             excel_bytes = export_database_to_excel(conn)
             export_state["excel_bytes"] = excel_bytes
             export_state["archive_bytes"] = export_full_archive(conn, excel_bytes)
         excel_bytes = export_state.get("excel_bytes")
         archive_bytes = export_state.get("archive_bytes")
-        download_cols = st.columns([0.5, 0.5])
-        with download_cols[0]:
-            st.download_button(
-                "⬇️ Download full database (Excel)",
-                excel_bytes,
-                file_name="ps_crm.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                disabled=not excel_bytes,
-                help="Prepare downloads to enable export files."
-                if not excel_bytes
-                else None,
-            )
-        with download_cols[1]:
-            st.download_button(
-                "⬇️ Download full archive (.rar)",
-                archive_bytes,
-                file_name="ps_crm_full.rar",
-                mime="application/x-rar-compressed",
-                help="Bundles the database, uploads, and receipts into one portable file.",
-                disabled=not archive_bytes,
-            )
+        if downloads_enabled:
+            if not excel_bytes and not archive_bytes:
+                st.info("Click “Prepare downloads” to generate export files.")
+            download_cols = st.columns([0.5, 0.5])
+            with download_cols[0]:
+                if excel_bytes:
+                    st.download_button(
+                        "⬇️ Download full database (Excel)",
+                        excel_bytes,
+                        file_name="ps_crm.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                else:
+                    st.info("Excel export not ready yet.")
+            with download_cols[1]:
+                if archive_bytes:
+                    st.download_button(
+                        "⬇️ Download full archive (.rar)",
+                        archive_bytes,
+                        file_name="ps_crm_full.rar",
+                        mime="application/x-rar-compressed",
+                        help="Bundles the database, uploads, and receipts into one portable file.",
+                    )
+                else:
+                    st.info("Archive export not ready yet.")
         backup_status = get_backup_status(BACKUP_DIR)
         if backup_status:
             backup_label = backup_status.get("last_backup_at") or "Unknown time"
@@ -14750,6 +14791,9 @@ def main():
     )
     st.session_state["auto_backup_error"] = backup_error
     login_box(conn, render_id=render_id)
+    # Auth gate: stop rendering any dashboard/navigation without a user session.
+    if not st.session_state.get("user"):
+        st.stop()
 
     if "page" not in st.session_state:
         st.session_state.page = "Dashboard"
