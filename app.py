@@ -3992,9 +3992,33 @@ def apply_theme_css() -> None:
         [data-testid="stMarkdownContainer"] h6 {{
             color: var(--ps-text);
         }}
+        [data-testid="stCaptionContainer"] p,
+        [data-testid="stCaptionContainer"] span,
+        .stCaption,
+        .stCaption p {{
+            color: var(--ps-muted) !important;
+        }}
         [data-testid="stMetric"] {{
             background: var(--ps-metric-bg);
             border: 1px solid var(--ps-metric-border);
+        }}
+        [data-testid="stExpander"] details {{
+            background-color: var(--ps-panel-bg);
+            border: 1px solid var(--ps-panel-border);
+            border-radius: 0.65rem;
+        }}
+        [data-testid="stExpander"] summary {{
+            color: var(--ps-text);
+            background-color: var(--ps-panel-bg);
+            border-radius: 0.65rem;
+        }}
+        [data-testid="stExpander"] summary:hover {{
+            background-color: var(--ps-button-hover);
+            color: var(--ps-text);
+        }}
+        [data-testid="stExpander"] div[role="region"] {{
+            background-color: var(--ps-panel-bg);
+            color: var(--ps-text);
         }}
         div[data-testid="stButton"] > button,
         div[data-testid="stDownloadButton"] > button,
@@ -4830,7 +4854,7 @@ def init_ui():
             justify-content: flex-end;
         }
         .ps-notification-popover button:hover {
-            background: rgba(29, 59, 100, 0.12) !important;
+            background: var(--ps-button-hover) !important;
         }
         .ps-notification-section-title {
             font-size: 0.9rem;
