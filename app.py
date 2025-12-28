@@ -4115,6 +4115,11 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             border: 1px solid var(--ps-panel-border) !important;
         }}
+        [data-testid="stToast"] > div,
+        .stToast > div {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
         [data-testid="stToast"] p,
         [data-testid="stToast"] span,
         [data-testid="stToast"] button,
@@ -4125,6 +4130,11 @@ def apply_theme_css() -> None:
         .stToast svg {{
             color: var(--ps-text) !important;
             fill: var(--ps-text) !important;
+        }}
+        [data-testid="stToast"] button,
+        .stToast button {{
+            background-color: var(--ps-button-bg) !important;
+            border-color: var(--ps-button-border) !important;
         }}
         [data-baseweb="tooltip"] > div,
         [data-baseweb="tooltip"] [role="tooltip"] {{
@@ -4155,6 +4165,13 @@ def apply_theme_css() -> None:
             border: 1px solid var(--ps-panel-border) !important;
             border-radius: 0.65rem;
         }}
+        [data-testid="stDataFrame"] > div,
+        [data-testid="stDataFrame"] [data-testid="stDataFrameResizable"],
+        [data-testid="stDataFrame"] [data-testid="stDataFrameScrollable"],
+        [data-testid="stDataEditor"] > div {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
         [data-testid="stDataFrame"] [data-baseweb="table"] > div,
         [data-testid="stDataFrame"] [data-baseweb="table"] [role="rowgroup"],
         [data-testid="stDataFrame"] [data-baseweb="table"] [role="grid"],
@@ -4183,6 +4200,16 @@ def apply_theme_css() -> None:
         [data-testid="stDataFrame"] [role="gridcell"],
         [data-testid="stDataEditor"] [role="columnheader"],
         [data-testid="stDataEditor"] [role="gridcell"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-testid="stDataFrame"] [role="row"],
+        [data-testid="stDataFrame"] [role="row"] > div,
+        [data-testid="stDataFrame"] [role="cell"],
+        [data-testid="stDataEditor"] [role="row"],
+        [data-testid="stDataEditor"] [role="row"] > div,
+        [data-testid="stDataEditor"] [role="cell"] {{
             background-color: var(--ps-panel-bg) !important;
             color: var(--ps-text) !important;
             border-color: var(--ps-panel-border) !important;
