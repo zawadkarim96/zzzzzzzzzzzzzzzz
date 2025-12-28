@@ -3846,29 +3846,321 @@ def _build_master_sheet(sheets: list[tuple[str, pd.DataFrame]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Sheet", "Details"])
 
 
+def get_theme() -> str:
+    theme = clean_text(st.session_state.get("theme")) or "light"
+    return "dark" if theme.lower().startswith("dark") else "light"
+
+
+def set_theme(value: object) -> None:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        theme = "dark" if normalized.startswith("dark") else "light"
+    else:
+        theme = "dark" if bool(value) else "light"
+    st.session_state["theme"] = theme
+
+
+def apply_theme_css() -> None:
+    if get_theme() != "dark":
+        return
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"],
+        [data-testid="stSidebar"] {
+            background-color: #0e1117;
+            color: #fafafa;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _find_login_cover_image() -> Optional[Path]:
+    preferred = PROJECT_ROOT / "assets" / "login cover.png"
+    if preferred.exists():
+        return preferred
+    candidates = [
+        "cover photo (1)",
+        "cover photo(1)",
+        "cover_photo(1)",
+        "cover_photo",
+        "cover-photo",
+        "cover",
+    ]
+    extensions = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+    search_roots = [PROJECT_ROOT, BASE_DIR]
+    for root in search_roots:
+        for base in candidates:
+            for ext in extensions:
+                candidate = root / f"{base}{ext}"
+                if candidate.exists():
+                    return candidate
+    for root in search_roots:
+        for path in root.rglob("cover photo (1).png"):
+            if path.is_file():
+                return path
+        for path in root.rglob("cover photo(1).*"):
+            if path.is_file():
+                return path
+    return None
+
+
+def _list_database_tables(conn: sqlite3.Connection) -> list[str]:
+    tables_df = df_query(
+        conn,
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """,
+    )
+    if tables_df.empty:
+        return []
+    return [clean_text(name) for name in tables_df["name"].tolist() if clean_text(name)]
+
+
+def _format_generic_table_dates(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+    formatted = df.copy()
+    for col in formatted.columns:
+        label = str(col).lower()
+        if "date" in label:
+            formatted[col] = pd.to_datetime(formatted[col], errors="coerce").dt.strftime(DATE_FMT)
+        elif label.endswith("_at") or label in {"created_at", "updated_at"}:
+            formatted[col] = pd.to_datetime(formatted[col], errors="coerce").dt.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+    return formatted
+
+
+def _build_generic_table_export(conn: sqlite3.Connection, table_name: str) -> pd.DataFrame:
+    df = df_query(conn, f'SELECT * FROM "{table_name}"')
+    return _format_generic_table_dates(df)
+
+
+def _build_report_cadence_summary(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = df_query(
+        conn,
+        """
+        SELECT period_type, COUNT(*) AS report_count
+        FROM work_reports
+        GROUP BY period_type
+        ORDER BY period_type
+        """,
+    )
+    if df.empty:
+        return df
+    df["Cadence"] = df["period_type"].apply(format_period_label)
+    return df.rename(columns={"report_count": "Report count"})[
+        ["Cadence", "Report count"]
+    ]
+
+
+def _build_report_coverage_summary(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = df_query(
+        conn,
+        """
+        SELECT COALESCE(u.username, 'User #' || wr.user_id) AS username,
+               wr.period_type,
+               COUNT(*) AS report_count
+        FROM work_reports wr
+        LEFT JOIN users u ON u.user_id = wr.user_id
+        GROUP BY u.username, wr.user_id, wr.period_type
+        ORDER BY LOWER(COALESCE(u.username, 'user')), wr.period_type
+        """,
+    )
+    if df.empty:
+        return df
+    df["Cadence"] = df["period_type"].apply(format_period_label)
+    pivot = (
+        df.pivot_table(
+            index="username",
+            columns="Cadence",
+            values="report_count",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .astype(int)
+        .reset_index()
+        .rename(columns={"username": "Team member"})
+    )
+    pivot.columns.name = None
+    return pivot
+
+
+def _build_admin_kpi_snapshot(conn: sqlite3.Connection) -> pd.DataFrame:
+    staff_df = df_query(
+        conn,
+        dedent(
+            """
+            SELECT user_id, COALESCE(username, 'User #' || user_id) AS username
+            FROM users
+            WHERE LOWER(COALESCE(role, 'staff')) <> 'admin'
+            ORDER BY LOWER(username)
+            """
+        ),
+    )
+
+    if staff_df.empty:
+        return staff_df
+
+    today = date.today()
+    start_month = today.replace(day=1)
+    days_elapsed = max((today - start_month).days + 1, 1)
+
+    monthly_df = df_query(
+        conn,
+        dedent(
+            """
+            SELECT user_id,
+                   COUNT(*) AS monthly_reports,
+                   MAX(date(period_start)) AS last_report_date
+            FROM work_reports
+            WHERE period_type='daily'
+              AND strftime('%Y-%m', period_start) = strftime('%Y-%m', 'now')
+            GROUP BY user_id
+            """
+        ),
+    ).rename(columns={"last_report_date": "last_report_month"})
+
+    lifetime_df = df_query(
+        conn,
+        dedent(
+            """
+            SELECT user_id,
+                   COUNT(*) AS total_reports,
+                   MIN(date(period_start)) AS first_report_date,
+                   MAX(date(period_start)) AS last_report_date
+            FROM work_reports
+            WHERE period_type='daily'
+            GROUP BY user_id
+            """
+        ),
+    ).rename(columns={"last_report_date": "last_report_all"})
+
+    def _parse_date(value: object) -> Optional[date]:
+        try:
+            parsed = pd.to_datetime(value, errors="coerce")
+        except Exception:
+            return None
+        if pd.isna(parsed):
+            return None
+        try:
+            return parsed.date()
+        except AttributeError:
+            return None
+
+    staff_df["user_id"] = staff_df["user_id"].apply(lambda val: int(float(val)))
+    staff_df = staff_df.rename(columns={"username": "Team member"})
+
+    merged = (
+        staff_df.merge(monthly_df, on="user_id", how="left")
+        .merge(lifetime_df, on="user_id", how="left")
+    )
+
+    merged[["monthly_reports", "total_reports"]] = merged[
+        ["monthly_reports", "total_reports"]
+    ].fillna(0)
+
+    kpi_rows: list[dict[str, object]] = []
+    for _, row in merged.iterrows():
+        monthly_reports = int(_coerce_float(row.get("monthly_reports"), 0.0))
+        total_reports = int(_coerce_float(row.get("total_reports"), 0.0))
+        last_seen = _parse_date(row.get("last_report_month")) or _parse_date(
+            row.get("last_report_all")
+        )
+        first_seen = _parse_date(row.get("first_report_date"))
+
+        days_since_last = (today - last_seen).days if last_seen else days_elapsed + 7
+        months_active = (
+            (today.year - first_seen.year) * 12 + today.month - first_seen.month + 1
+            if first_seen
+            else 1
+        )
+        months_active = max(months_active, 1)
+
+        monthly_completion = (monthly_reports / days_elapsed) * 100
+        recency_penalty = min(days_since_last * 3.0, 60.0)
+        momentum_boost = min((total_reports / months_active) * 2.5, 25.0)
+        monthly_score = max(
+            0.0,
+            min(100.0, monthly_completion - recency_penalty + 20.0 + momentum_boost),
+        )
+
+        lifetime_velocity = (total_reports / months_active) / 20.0
+        lifetime_score = max(
+            0.0,
+            min(
+                100.0,
+                (lifetime_velocity * 100.0) - min(days_since_last * 1.5, 40.0) + 20.0,
+            ),
+        )
+
+        kpi_rows.append(
+            {
+                "Team member": clean_text(row.get("Team member"))
+                or f"User #{int(row.get('user_id'))}",
+                "Monthly KPI": f"{monthly_score:,.0f}/100",
+                "Lifetime KPI": f"{lifetime_score:,.0f}/100",
+            }
+        )
+
+    return pd.DataFrame(kpi_rows)
+
+
+def _safe_sheet_name(name: str, used: set[str]) -> str:
+    safe_name = (name or "Sheet").strip()
+    if not safe_name:
+        safe_name = "Sheet"
+    safe_name = safe_name[:31]
+    candidate = safe_name
+    counter = 2
+    while candidate in used:
+        suffix = f"_{counter}"
+        candidate = f"{safe_name[:31 - len(suffix)]}{suffix}"
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
 def export_database_to_excel(conn) -> bytes:
     sheet_builders = [
-        ("Customers", _build_customers_export),
-        ("Delivery orders", _build_delivery_orders_export),
-        ("Warranties", _build_warranties_export),
-        ("Services", _build_services_export),
-        ("Maintenance", _build_maintenance_export),
+        ("Customers (view)", _build_customers_export),
+        ("Delivery orders (view)", _build_delivery_orders_export),
+        ("Warranties (view)", _build_warranties_export),
+        ("Services (view)", _build_services_export),
+        ("Maintenance (view)", _build_maintenance_export),
+        ("Quotations (view)", _build_quotations_export),
+        ("Report cadence", _build_report_cadence_summary),
+        ("Report coverage", _build_report_coverage_summary),
+        ("Admin KPI snapshot", _build_admin_kpi_snapshot),
     ]
 
     sheet_data: list[tuple[str, pd.DataFrame]] = []
     for name, builder in sheet_builders:
-        df = builder(conn)
+        try:
+            df = builder(conn)
+        except Exception:
+            df = pd.DataFrame()
         sheet_data.append((name, df))
+
+    for table_name in _list_database_tables(conn):
+        df = _build_generic_table_export(conn, table_name)
+        sheet_data.append((f"Table: {table_name}", df))
 
     master_df = _build_master_sheet(sheet_data)
     ordered_sheets = [("Master", master_df)] + sheet_data
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        used_names: set[str] = set()
         for sheet_name, df in ordered_sheets:
-            safe_name = sheet_name[:31] if sheet_name else "Sheet"
-            if not safe_name:
-                safe_name = "Sheet"
+            safe_name = _safe_sheet_name(sheet_name, used_names)
             if df is None or df.empty:
                 df_to_write = pd.DataFrame()
             else:
@@ -3907,6 +4199,35 @@ def export_full_archive(
             excel_bytes = export_database_to_excel(active_conn)
 
         db_path = Path(DB_PATH)
+        resource_paths = [
+            PROJECT_ROOT / "import_template.xlsx",
+            PROJECT_ROOT / "ps_letterhead.png",
+            PROJECT_ROOT / "letterhead",
+            PROJECT_ROOT / "assets",
+        ]
+
+        def _iter_files(path: Path) -> Iterable[Path]:
+            if path.is_file():
+                yield path
+            elif path.is_dir():
+                yield from (p for p in path.rglob("*") if p.is_file())
+
+        raw_storage_files = [
+            path
+            for path in (BASE_DIR.rglob("*") if BASE_DIR.exists() else [])
+            if path.is_file()
+        ]
+        storage_files = [
+            path
+            for path in raw_storage_files
+            if not (db_path.exists() and path.resolve() == db_path.resolve())
+        ]
+        resource_counts: dict[Path, int] = {}
+        resource_files: list[Path] = []
+        for res in resource_paths:
+            files = list(_iter_files(res))
+            resource_counts[res] = len(files)
+            resource_files.extend(files)
 
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
             if db_path.exists():
@@ -3922,11 +4243,35 @@ def export_full_archive(
                 )
 
             if BASE_DIR.exists():
-                for path in BASE_DIR.rglob("*"):
-                    if path.is_file():
-                        if db_path.exists() and path.resolve() == db_path.resolve():
-                            continue
-                        zf.write(path, arcname=str(Path("storage") / path.relative_to(BASE_DIR)))
+                for path in storage_files:
+                    zf.write(path, arcname=str(Path("storage") / path.relative_to(BASE_DIR)))
+
+            for res in resource_paths:
+                for file_path in _iter_files(res):
+                    arcname = Path("resources") / file_path.relative_to(res.parent)
+                    zf.write(file_path, arcname=str(arcname))
+
+            total_exports = 0
+            if dump_bytes:
+                total_exports += 1
+            if excel_bytes:
+                total_exports += 1
+            manifest_lines = [
+                f"Export generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Database path: {db_path} (included: {'yes' if db_path.exists() else 'no'})",
+                "SQL dump: exports/ps_crm.sql",
+                "Excel export: exports/ps_crm.xlsx",
+                f"Storage directory: {BASE_DIR} (files: {len(storage_files)})",
+            ]
+            for res in resource_paths:
+                manifest_lines.append(
+                    f"Resource: {res} (files: {resource_counts.get(res, 0)})"
+                )
+            manifest_lines.append(
+                "Total archive files: "
+                f"{len(storage_files) + len(resource_files) + (1 if db_path.exists() else 0) + total_exports + 1}"
+            )
+            zf.writestr("manifest.txt", "\n".join(manifest_lines))
     finally:
         if close_conn:
             active_conn.close()
@@ -4267,52 +4612,93 @@ def init_ui():
         unsafe_allow_html=True,
     )
 # ---------- Auth ----------
+def _clear_session_for_logout() -> None:
+    preserved = {}
+    if "theme" in st.session_state:
+        preserved["theme"] = st.session_state.get("theme")
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    for k, val in preserved.items():
+        st.session_state[k] = val
+
+
 def login_box(conn, *, render_id=None):
+    apply_theme_css()
     logout_button_key = f"sidebar_logout_main_{render_id or st.session_state.get('_render_id', 0)}"
     if st.session_state.user:
         st.sidebar.markdown("### Login")
         st.sidebar.success(f"Logged in as {st.session_state.user['username']} ({st.session_state.user['role']})")
         if st.sidebar.button("Logout", key=logout_button_key):
             # Ensure logout clears full session so auth gate can block dashboard.
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
+            _clear_session_for_logout()
             st.rerun()
         return True
     # Hide Streamlit chrome on the login screen (auth gate UI only).
     st.set_option("client.toolbarMode", "viewer")
+    cover_image = _find_login_cover_image()
+    cover_css = ""
+    if cover_image:
+        try:
+            with open(cover_image, "rb") as handle:
+                encoded = base64.b64encode(handle.read()).decode("utf-8")
+            cover_css = (
+                "background-image: url('data:image/png;base64,"
+                f"{encoded}');"
+            )
+        except OSError:
+            cover_css = ""
+    panel_bg = "rgba(255, 255, 255, 0.88)" if get_theme() == "light" else "rgba(18, 22, 32, 0.85)"
+    panel_text = "#111" if get_theme() == "light" else "#f5f5f5"
     st.markdown(
-        """
+        f"""
         <style>
         #MainMenu,
         header,
         footer,
         div[data-testid="stToolbar"],
         div[data-testid="stStatusWidget"],
-        div[data-testid="stDecoration"] {
+        div[data-testid="stDecoration"] {{
             display: none !important;
-        }
+        }}
+        [data-testid="stSidebar"] {{
+            display: none !important;
+        }}
+        [data-testid="stAppViewContainer"] {{
+            {cover_css}
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }}
+        section.main > div {{
+            padding-top: 3rem;
+        }}
+        div[data-testid="stForm"] {{
+            background: {panel_bg};
+            color: {panel_text};
+            padding: 1.75rem 2rem;
+            border-radius: 18px;
+            max-width: 420px;
+            margin: 2rem auto 0 auto;
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-    st.sidebar.toggle("Dark mode", key="login_theme_toggle")
-    if st.session_state.get("login_theme_toggle"):
-        st.markdown(
-            """
-            <style>
-            [data-testid="stAppViewContainer"],
-            [data-testid="stSidebar"] {
-                background-color: #0e1117;
-                color: #fafafa;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
+    toggle_cols = st.columns([1, 1, 1])
+    with toggle_cols[2]:
+        login_dark = st.toggle(
+            "Dark mode",
+            value=get_theme() == "dark",
+            key="login_theme_toggle",
         )
-    with st.sidebar.form("login_form"):
+    set_theme(login_dark)
+    apply_theme_css()
+    with st.form("login_form"):
+        st.markdown("### Welcome back")
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
-        ok = st.form_submit_button("Login")
+        ok = st.form_submit_button("Login", use_container_width=True)
     if ok:
         row = df_query(
             conn,
@@ -5402,10 +5788,10 @@ def dashboard(conn):
             with download_cols[1]:
                 if archive_bytes:
                     st.download_button(
-                        "⬇️ Download full archive (.rar)",
+                        "⬇️ Download full archive (.zip)",
                         archive_bytes,
-                        file_name="ps_crm_full.rar",
-                        mime="application/x-rar-compressed",
+                        file_name="ps_crm_full.zip",
+                        mime="application/zip",
                         help="Bundles the database, uploads, and receipts into one portable file.",
                     )
                 else:
@@ -14779,6 +15165,7 @@ def reports_page(conn):
 def main():
     st.session_state["_render_id"] = st.session_state.get("_render_id", 0) + 1
     render_id = st.session_state["_render_id"]
+    apply_theme_css()
     init_ui()
     _ensure_quotation_editor_server()
     conn = get_conn()
@@ -14801,6 +15188,13 @@ def main():
     user = st.session_state.user or {}
     role = user.get("role")
     with st.sidebar:
+        sidebar_dark = st.toggle(
+            "Dark mode",
+            value=get_theme() == "dark",
+            key="sidebar_theme_toggle",
+        )
+        set_theme(sidebar_dark)
+        apply_theme_css()
         st.markdown("### Navigation")
         if role == "admin":
             pages = [
