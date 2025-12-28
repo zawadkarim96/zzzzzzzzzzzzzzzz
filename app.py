@@ -4178,6 +4178,16 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             border-color: var(--ps-panel-border) !important;
         }}
+        .stDataFrame [role="columnheader"],
+        .stDataFrame [role="gridcell"],
+        .stDataFrame [role="row"],
+        .stDataFrame [data-baseweb="table"],
+        .stDataFrame [data-baseweb="table"] th,
+        .stDataFrame [data-baseweb="table"] td {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
         [data-testid="stDataFrame"] [data-baseweb="table"],
         [data-testid="stDataEditor"] [data-baseweb="table"],
         [data-testid="stDataFrame"] [data-baseweb="table"] tbody,
@@ -4211,6 +4221,13 @@ def apply_theme_css() -> None:
         }}
         [data-baseweb="table"] [role="row"]:nth-child(even) {{
             background-color: var(--ps-table-row-alt-bg) !important;
+        }}
+        .stDataFrame [data-baseweb="table"] [role="row"]:nth-child(even),
+        .stTable tbody tr:nth-child(even) {{
+            background-color: var(--ps-table-row-alt-bg) !important;
+        }}
+        .stDataFrame [data-baseweb="table"] [role="columnheader"] {{
+            background-color: var(--ps-table-header-bg) !important;
         }}
         [data-testid="stTable"] {{
             background-color: var(--ps-panel-bg) !important;
