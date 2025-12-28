@@ -4178,6 +4178,21 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             border-color: var(--ps-panel-border) !important;
         }}
+        [data-testid="stDataFrame"] [data-baseweb="table"],
+        [data-testid="stDataEditor"] [data-baseweb="table"],
+        [data-testid="stDataFrame"] [data-baseweb="table"] tbody,
+        [data-testid="stDataEditor"] [data-baseweb="table"] tbody,
+        [data-testid="stDataFrame"] [data-baseweb="table"] thead,
+        [data-testid="stDataEditor"] [data-baseweb="table"] thead {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stDataEditor"] input,
+        [data-testid="stDataEditor"] textarea {{
+            background-color: var(--ps-input-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-input-border) !important;
+        }}
         [data-baseweb="table"] {{
             background-color: var(--ps-panel-bg) !important;
             color: var(--ps-text) !important;
@@ -4237,6 +4252,9 @@ def apply_theme_css() -> None:
             background-color: var(--ps-panel-bg) !important;
             border-color: var(--ps-panel-border) !important;
             color: var(--ps-text) !important;
+        }}
+        [data-testid="stFileUploader"] {{
+            background-color: var(--ps-panel-bg) !important;
         }}
         [data-testid="stFileUploader"] section p,
         [data-testid="stFileUploader"] section span,
@@ -5046,16 +5064,15 @@ def login_box(conn, *, render_id=None):
             )
         except OSError:
             cover_css = ""
-    theme = get_theme()
-    app_bg = "#ffffff" if theme == "light" else "#0e1117"
-    panel_bg = "#ffffff" if theme == "light" else "#0f172a"
-    panel_text = "#111827" if theme == "light" else "#f8fafc"
-    input_bg = "#ffffff" if theme == "light" else "#1f2937"
-    input_border = "#d6deea" if theme == "light" else "#334155"
-    placeholder_color = "rgba(75, 85, 99, 0.9)" if theme == "light" else "rgba(148, 163, 184, 0.9)"
-    button_bg = "var(--ps-button-primary-bg)"
-    button_text = "var(--ps-button-primary-text)"
-    button_hover = "var(--ps-button-primary-hover)"
+    app_bg = "#ffffff"
+    panel_bg = "#ffffff"
+    panel_text = "#111827"
+    input_bg = "#ffffff"
+    input_border = "#d1d5db"
+    placeholder_color = "rgba(75, 85, 99, 0.9)"
+    button_bg = "#ffffff"
+    button_text = "#111827"
+    button_hover = "#f3f4f6"
     st.markdown(
         f"""
         <style>
@@ -5106,7 +5123,7 @@ def login_box(conn, *, render_id=None):
         div[data-testid="stForm"] button {{
             background: {button_bg};
             color: {button_text};
-            border: 1px solid {button_bg};
+            border: 1px solid {input_border};
         }}
         div[data-testid="stForm"] button span {{
             color: {button_text};
