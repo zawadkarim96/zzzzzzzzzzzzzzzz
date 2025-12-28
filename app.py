@@ -3882,6 +3882,8 @@ def apply_theme_css() -> None:
             "button_primary_hover": "#0ea5e9",
             "metric_bg": "rgba(255, 255, 255, 0.04)",
             "metric_border": "rgba(250, 250, 250, 0.12)",
+            "table_header_bg": "#111827",
+            "table_row_alt_bg": "rgba(148, 163, 184, 0.08)",
         }
     else:
         colors = {
@@ -3903,6 +3905,8 @@ def apply_theme_css() -> None:
             "button_primary_hover": "#1e4b82",
             "metric_bg": "#f7f9fc",
             "metric_border": "rgba(49, 51, 63, 0.08)",
+            "table_header_bg": "#f3f4f6",
+            "table_row_alt_bg": "rgba(15, 23, 42, 0.04)",
         }
     st.markdown(
         f"""
@@ -3926,6 +3930,8 @@ def apply_theme_css() -> None:
             --ps-button-primary-bg: {colors['button_primary_bg']};
             --ps-button-primary-text: {colors['button_primary_text']};
             --ps-button-primary-hover: {colors['button_primary_hover']};
+            --ps-table-header-bg: {colors['table_header_bg']};
+            --ps-table-row-alt-bg: {colors['table_row_alt_bg']};
             color-scheme: {theme};
         }}
         body,
@@ -4182,8 +4188,50 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             border-color: var(--ps-panel-border) !important;
         }}
+        [data-baseweb="table"] th {{
+            background-color: var(--ps-table-header-bg) !important;
+        }}
         [data-baseweb="table"] [role="row"] {{
             background-color: var(--ps-panel-bg) !important;
+        }}
+        [data-baseweb="table"] [role="row"]:nth-child(even) {{
+            background-color: var(--ps-table-row-alt-bg) !important;
+        }}
+        [data-testid="stTable"] {{
+            background-color: var(--ps-panel-bg) !important;
+            border: 1px solid var(--ps-panel-border);
+            border-radius: 0.65rem;
+            overflow: hidden;
+        }}
+        [data-testid="stTable"] table {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stTable"] th,
+        [data-testid="stTable"] td {{
+            border-color: var(--ps-panel-border) !important;
+            color: var(--ps-text) !important;
+            background-color: var(--ps-panel-bg) !important;
+        }}
+        [data-testid="stTable"] th {{
+            background-color: var(--ps-table-header-bg) !important;
+        }}
+        [data-testid="stTable"] tbody tr:nth-child(even) {{
+            background-color: var(--ps-table-row-alt-bg) !important;
+        }}
+        [data-testid="stMarkdownContainer"] table {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-testid="stMarkdownContainer"] th,
+        [data-testid="stMarkdownContainer"] td {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-testid="stMarkdownContainer"] th {{
+            background-color: var(--ps-table-header-bg) !important;
         }}
         [data-testid="stFileUploader"] section {{
             background-color: var(--ps-panel-bg) !important;
@@ -5005,9 +5053,9 @@ def login_box(conn, *, render_id=None):
     input_bg = "#ffffff" if theme == "light" else "#1f2937"
     input_border = "#d6deea" if theme == "light" else "#334155"
     placeholder_color = "rgba(75, 85, 99, 0.9)" if theme == "light" else "rgba(148, 163, 184, 0.9)"
-    button_bg = "#ffffff"
-    button_text = "#111827"
-    button_hover = "#f1f5f9"
+    button_bg = "var(--ps-button-primary-bg)"
+    button_text = "var(--ps-button-primary-text)"
+    button_hover = "var(--ps-button-primary-hover)"
     st.markdown(
         f"""
         <style>
@@ -5058,13 +5106,16 @@ def login_box(conn, *, render_id=None):
         div[data-testid="stForm"] button {{
             background: {button_bg};
             color: {button_text};
-            border: none;
+            border: 1px solid {button_bg};
         }}
         div[data-testid="stForm"] button span {{
             color: {button_text};
         }}
         div[data-testid="stForm"] button:hover {{
             background: {button_hover};
+            color: {button_text};
+        }}
+        div[data-testid="stForm"] button:hover span {{
             color: {button_text};
         }}
         div[data-testid="stForm"] [data-baseweb="input"] button {{
@@ -5074,6 +5125,9 @@ def login_box(conn, *, render_id=None):
         }}
         div[data-testid="stForm"] [data-baseweb="input"] button:hover {{
             background-color: rgba(148, 163, 184, 0.15) !important;
+        }}
+        div[data-testid="stForm"] [data-baseweb="input"] button span {{
+            color: {panel_text} !important;
         }}
         div[data-testid="stForm"] [data-baseweb="input"] button svg {{
             fill: {panel_text} !important;
