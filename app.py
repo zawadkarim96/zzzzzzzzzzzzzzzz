@@ -4575,7 +4575,6 @@ def init_ui():
         st.markdown(
             """
             <style>
-            div[data-testid="stToolbar"],
             div[data-testid="stStatusWidget"],
             div[data-testid="stDecoration"] {
                 display: none !important;
@@ -4685,7 +4684,7 @@ def login_box(conn, *, render_id=None):
             background-repeat: no-repeat;
         }}
         section.main > div {{
-            padding-top: 5rem;
+            padding-top: 6rem;
         }}
         div[data-testid="stForm"] {{
             background: {panel_bg};
@@ -4693,8 +4692,11 @@ def login_box(conn, *, render_id=None):
             padding: 1.75rem 2rem;
             border-radius: 18px;
             max-width: 420px;
-            margin: 4rem auto 0 auto;
+            margin: 6.25rem auto 0 auto;
             box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+        }}
+        div[data-testid="stForm"] h3 {{
+            color: {panel_text};
         }}
         div[data-testid="stForm"] label {{
             color: {panel_text};
@@ -4706,6 +4708,15 @@ def login_box(conn, *, render_id=None):
         }}
         div[data-testid="stForm"] input::placeholder {{
             color: {placeholder_color};
+        }}
+        div[data-testid="stForm"] button {{
+            background: #111827;
+            color: #f9fafb;
+            border: none;
+        }}
+        div[data-testid="stForm"] button:hover {{
+            background: #0f172a;
+            color: #f9fafb;
         }}
         </style>
         """,
