@@ -4029,6 +4029,11 @@ def apply_theme_css() -> None:
             border: 1px solid var(--ps-panel-border) !important;
             box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
         }}
+        [data-testid="stPopover"] [role="dialog"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border: 1px solid var(--ps-panel-border) !important;
+        }}
         [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] p,
         [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] span,
         [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] li,
@@ -4039,6 +4044,39 @@ def apply_theme_css() -> None:
         [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h5,
         [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h6 {{
             color: var(--ps-text) !important;
+        }}
+        [data-testid="stPopover"] [role="dialog"] p,
+        [data-testid="stPopover"] [role="dialog"] span,
+        [data-testid="stPopover"] [role="dialog"] li,
+        [data-testid="stPopover"] [role="dialog"] label {{
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stAlert"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-testid="stAlert"] p,
+        [data-testid="stAlert"] span,
+        [data-testid="stAlert"] li {{
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stToast"],
+        .stToast {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border: 1px solid var(--ps-panel-border) !important;
+        }}
+        [data-testid="stToast"] p,
+        [data-testid="stToast"] span,
+        [data-testid="stToast"] button,
+        [data-testid="stToast"] svg,
+        .stToast p,
+        .stToast span,
+        .stToast button,
+        .stToast svg {{
+            color: var(--ps-text) !important;
+            fill: var(--ps-text) !important;
         }}
         [data-testid="stVegaLiteChart"] svg,
         [data-testid="stVegaLiteChart"] canvas {{
