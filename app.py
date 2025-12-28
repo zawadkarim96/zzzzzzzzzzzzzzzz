@@ -4023,6 +4023,30 @@ def apply_theme_css() -> None:
             border-color: var(--ps-button-primary-hover) !important;
             color: var(--ps-button-primary-text) !important;
         }}
+        [data-testid="stPopoverContent"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border: 1px solid var(--ps-panel-border) !important;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+        }}
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] span,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] li,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h4,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h5,
+        [data-testid="stPopoverContent"] [data-testid="stMarkdownContainer"] h6 {{
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stVegaLiteChart"] svg,
+        [data-testid="stVegaLiteChart"] canvas {{
+            background-color: var(--ps-panel-bg) !important;
+        }}
+        [data-testid="stVegaLiteChart"] text {{
+            fill: var(--ps-muted) !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
