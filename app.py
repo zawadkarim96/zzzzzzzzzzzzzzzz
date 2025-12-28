@@ -4053,6 +4053,14 @@ def apply_theme_css() -> None:
             border: 1px solid var(--ps-panel-border) !important;
             box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
         }}
+        [data-baseweb="popover"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
+        [data-baseweb="popover"] > div {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
         [data-testid="stPopover"] [role="dialog"] {{
             background-color: var(--ps-panel-bg) !important;
             color: var(--ps-text) !important;
@@ -4074,6 +4082,16 @@ def apply_theme_css() -> None:
         [data-testid="stPopover"] [role="dialog"] li,
         [data-testid="stPopover"] [role="dialog"] label {{
             color: var(--ps-text) !important;
+        }}
+        [data-testid="stPopoverContent"] .stCaption,
+        [data-testid="stPopoverContent"] .stCaption span,
+        [data-testid="stPopover"] [role="dialog"] .stCaption,
+        [data-testid="stPopover"] [role="dialog"] .stCaption span {{
+            color: var(--ps-muted) !important;
+        }}
+        [data-testid="stPopoverContent"] hr,
+        [data-testid="stPopover"] [role="dialog"] hr {{
+            border-color: var(--ps-panel-border) !important;
         }}
         [data-testid="stAlert"] {{
             background-color: var(--ps-panel-bg) !important;
