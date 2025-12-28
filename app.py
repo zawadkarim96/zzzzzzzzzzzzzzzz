@@ -4164,6 +4164,27 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             background-color: var(--ps-panel-bg) !important;
         }}
+        [data-testid="stDataFrame"] [role="columnheader"],
+        [data-testid="stDataFrame"] [role="gridcell"],
+        [data-testid="stDataEditor"] [role="columnheader"],
+        [data-testid="stDataEditor"] [role="gridcell"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-baseweb="table"] {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+        }}
+        [data-baseweb="table"] th,
+        [data-baseweb="table"] td {{
+            background-color: var(--ps-panel-bg) !important;
+            color: var(--ps-text) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
+        [data-baseweb="table"] [role="row"] {{
+            background-color: var(--ps-panel-bg) !important;
+        }}
         [data-testid="stFileUploader"] section {{
             background-color: var(--ps-panel-bg) !important;
             border-color: var(--ps-panel-border) !important;
@@ -4174,6 +4195,16 @@ def apply_theme_css() -> None:
         [data-testid="stFileUploader"] section svg {{
             color: var(--ps-text) !important;
             fill: var(--ps-text) !important;
+        }}
+        [data-testid="stFileUploader"] button {{
+            background-color: var(--ps-button-bg) !important;
+            border-color: var(--ps-button-border) !important;
+            color: var(--ps-button-text) !important;
+        }}
+        [data-testid="stFileUploader"] button:hover {{
+            background-color: var(--ps-button-hover) !important;
+            border-color: var(--ps-button-border) !important;
+            color: var(--ps-button-text) !important;
         }}
         </style>
         """,
@@ -4961,22 +4992,22 @@ def login_box(conn, *, render_id=None):
         try:
             with open(cover_image, "rb") as handle:
                 encoded = base64.b64encode(handle.read()).decode("utf-8")
-            if get_theme() == "dark":
-                cover_css = (
-                    "background-image: url('data:image/png;base64,"
-                    f"{encoded}');"
-                )
+            cover_css = (
+                "background-image: url('data:image/png;base64,"
+                f"{encoded}');"
+            )
         except OSError:
             cover_css = ""
     theme = get_theme()
+    app_bg = "#ffffff" if theme == "light" else "#0e1117"
     panel_bg = "#ffffff" if theme == "light" else "#0f172a"
     panel_text = "#111827" if theme == "light" else "#f8fafc"
     input_bg = "#ffffff" if theme == "light" else "#1f2937"
     input_border = "#d6deea" if theme == "light" else "#334155"
     placeholder_color = "rgba(75, 85, 99, 0.9)" if theme == "light" else "rgba(148, 163, 184, 0.9)"
-    button_bg = "#1d3b64" if theme == "light" else "#111827"
-    button_text = "#ffffff" if theme == "light" else "#f9fafb"
-    button_hover = "#1e4b82" if theme == "light" else "#0f172a"
+    button_bg = "#ffffff"
+    button_text = "#111827"
+    button_hover = "#f1f5f9"
     st.markdown(
         f"""
         <style>
@@ -4996,7 +5027,7 @@ def login_box(conn, *, render_id=None):
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
-            background-color: #ffffff;
+            background-color: {app_bg};
         }}
         section.main > div {{
             padding-top: 6rem;
@@ -5035,6 +5066,17 @@ def login_box(conn, *, render_id=None):
         div[data-testid="stForm"] button:hover {{
             background: {button_hover};
             color: {button_text};
+        }}
+        div[data-testid="stForm"] [data-baseweb="input"] button {{
+            background-color: transparent !important;
+            color: {panel_text} !important;
+            border-left: 1px solid {input_border};
+        }}
+        div[data-testid="stForm"] [data-baseweb="input"] button:hover {{
+            background-color: rgba(148, 163, 184, 0.15) !important;
+        }}
+        div[data-testid="stForm"] [data-baseweb="input"] button svg {{
+            fill: {panel_text} !important;
         }}
         </style>
         """,
