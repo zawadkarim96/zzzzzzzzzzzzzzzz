@@ -4117,6 +4117,8 @@ def _safe_sheet_name(name: str, used: set[str]) -> str:
     safe_name = (name or "Sheet").strip()
     if not safe_name:
         safe_name = "Sheet"
+    safe_name = re.sub(r"[\\/*?:\[\]]", " ", safe_name)
+    safe_name = " ".join(safe_name.split()).strip() or "Sheet"
     safe_name = safe_name[:31]
     candidate = safe_name
     counter = 2
@@ -4128,18 +4130,23 @@ def _safe_sheet_name(name: str, used: set[str]) -> str:
     return candidate
 
 
-def export_database_to_excel(conn) -> bytes:
+def export_database_to_excel(conn, include_all: bool = False) -> bytes:
     sheet_builders = [
-        ("Customers (view)", _build_customers_export),
-        ("Delivery orders (view)", _build_delivery_orders_export),
-        ("Warranties (view)", _build_warranties_export),
-        ("Services (view)", _build_services_export),
-        ("Maintenance (view)", _build_maintenance_export),
-        ("Quotations (view)", _build_quotations_export),
-        ("Report cadence", _build_report_cadence_summary),
-        ("Report coverage", _build_report_coverage_summary),
-        ("Admin KPI snapshot", _build_admin_kpi_snapshot),
+        ("Customers", _build_customers_export),
+        ("Delivery orders", _build_delivery_orders_export),
+        ("Warranties", _build_warranties_export),
+        ("Services", _build_services_export),
+        ("Maintenance", _build_maintenance_export),
     ]
+    if include_all:
+        sheet_builders.extend(
+            [
+                ("Quotations", _build_quotations_export),
+                ("Report cadence", _build_report_cadence_summary),
+                ("Report coverage", _build_report_coverage_summary),
+                ("Admin KPI snapshot", _build_admin_kpi_snapshot),
+            ]
+        )
 
     sheet_data: list[tuple[str, pd.DataFrame]] = []
     for name, builder in sheet_builders:
@@ -4149,9 +4156,10 @@ def export_database_to_excel(conn) -> bytes:
             df = pd.DataFrame()
         sheet_data.append((name, df))
 
-    for table_name in _list_database_tables(conn):
-        df = _build_generic_table_export(conn, table_name)
-        sheet_data.append((f"Table: {table_name}", df))
+    if include_all:
+        for table_name in _list_database_tables(conn):
+            df = _build_generic_table_export(conn, table_name)
+            sheet_data.append((f"Table: {table_name}", df))
 
     master_df = _build_master_sheet(sheet_data)
     ordered_sheets = [("Master", master_df)] + sheet_data
@@ -4196,7 +4204,7 @@ def export_full_archive(
         dump_bytes = dump_buffer.getvalue().encode("utf-8")
 
         if excel_bytes is None:
-            excel_bytes = export_database_to_excel(active_conn)
+            excel_bytes = export_database_to_excel(active_conn, include_all=True)
 
         db_path = Path(DB_PATH)
         resource_paths = [
@@ -5794,7 +5802,7 @@ def dashboard(conn):
         )
         if downloads_enabled and st.button("Prepare downloads", use_container_width=True):
             # Generate admin export bytes only on explicit request (IDM-safe).
-            excel_bytes = export_database_to_excel(conn)
+            excel_bytes = export_database_to_excel(conn, include_all=True)
             export_state["excel_bytes"] = excel_bytes
             export_state["archive_bytes"] = export_full_archive(conn, excel_bytes)
         excel_bytes = export_state.get("excel_bytes")
@@ -15217,9 +15225,10 @@ def main():
     role = user.get("role")
     with st.sidebar:
         sidebar_dark = st.toggle(
-            "Dark mode",
+            "Mode",
             value=get_theme() == "dark",
             key="sidebar_theme_toggle",
+            help="Toggle between light and dark.",
         )
         set_theme(sidebar_dark)
         apply_theme_css()
