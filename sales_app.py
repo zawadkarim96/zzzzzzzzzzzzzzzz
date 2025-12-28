@@ -2369,6 +2369,72 @@ def login_screen() -> None:
             st.error(error or "Invalid credentials")
 
 
+def apply_theme_styles() -> None:
+    theme = st.session_state.setdefault(
+        "theme_colors",
+        {
+            "primary": "#1f77b4",
+            "sidebar_bg": "#f8f9fb",
+        },
+    )
+    primary = theme.get("primary", "#1f77b4")
+    sidebar_bg = theme.get("sidebar_bg", "#f8f9fb")
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --ps-primary-color: {primary};
+        }}
+        .stButton > button {{
+            background-color: var(--ps-primary-color);
+            border-color: var(--ps-primary-color);
+            color: #ffffff;
+        }}
+        .stButton > button:hover {{
+            border-color: var(--ps-primary-color);
+            color: #ffffff;
+        }}
+        [data-testid="stSidebar"] {{
+            background-color: {sidebar_bg};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _theme_controls() -> None:
+    theme = st.session_state.setdefault(
+        "theme_colors",
+        {
+            "primary": "#1f77b4",
+            "sidebar_bg": "#f8f9fb",
+        },
+    )
+
+    def _render_controls() -> None:
+        theme["primary"] = st.color_picker(
+            "Primary color",
+            value=theme.get("primary", "#1f77b4"),
+            key="theme_primary_color",
+        )
+        theme["sidebar_bg"] = st.color_picker(
+            "Sidebar background",
+            value=theme.get("sidebar_bg", "#f8f9fb"),
+            key="theme_sidebar_bg",
+        )
+        if st.button("Reset theme", use_container_width=True):
+            theme.update({"primary": "#1f77b4", "sidebar_bg": "#f8f9fb"})
+            rerun()
+
+    if hasattr(st.sidebar, "popover"):
+        with st.sidebar.popover("Theme"):
+            _render_controls()
+    else:
+        with st.sidebar.expander("Theme", expanded=False):
+            _render_controls()
+
+
 def sidebar(user: Dict) -> str:
     pages_common = {
         "Dashboard": "dashboard",
@@ -2380,7 +2446,6 @@ def sidebar(user: Dict) -> str:
         "Companies": "companies",
         "Advanced Filters": "admin_filters",
         "Users": "users",
-        "Settings": "settings",
     }
     if user["role"] == "admin":
         pages = {**pages_common, **pages_admin}
@@ -2415,8 +2480,9 @@ def sidebar(user: Dict) -> str:
     )
     st.sidebar.write("---")
     st.sidebar.write(f"Logged in as **{user['username']}** ({user['role']})")
+    _theme_controls()
     if st.sidebar.button("Logout"):
-        st.session_state.pop("user", None)
+        st.session_state["logout_requested"] = True
         rerun()
     return st.session_state.get("active_page", "dashboard")
 
@@ -3199,8 +3265,15 @@ def render_dashboard(user: Dict) -> None:
         st.session_state["_seen_notification_ids"] = list(seen_ids)
     if user["role"] == "admin":
         export_cols = st.columns(2)
-        excel_data = build_excel_export()
-        archive_data = build_full_archive(excel_data)
+        export_state = st.session_state.setdefault("export_state", {})
+        if st.button("Prepare exports", use_container_width=True):
+            excel_data = build_excel_export()
+            export_state["excel_data"] = excel_data
+            export_state["archive_data"] = build_full_archive(excel_data)
+            if not excel_data:
+                st.info("Install 'xlsxwriter' to enable Excel exports.")
+        excel_data = export_state.get("excel_data")
+        archive_data = export_state.get("archive_data")
         with export_cols[0]:
             st.download_button(
                 "Download Excel summary",
@@ -3208,7 +3281,9 @@ def render_dashboard(user: Dict) -> None:
                 file_name="ps_sales_summary.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 disabled=not excel_data,
-                help=None if excel_data else "Install 'xlsxwriter' to enable Excel exports.",
+                help="Prepare exports to enable downloads."
+                if not excel_data
+                else None,
             )
         with export_cols[1]:
             st.download_button(
@@ -3216,6 +3291,10 @@ def render_dashboard(user: Dict) -> None:
                 data=archive_data,
                 file_name="ps_sales_full_export.rar",
                 mime="application/octet-stream",
+                disabled=not archive_data,
+                help="Prepare exports to enable downloads."
+                if not archive_data
+                else None,
             )
         backup_status = get_backup_status(BACKUP_DIR)
         if backup_status:
@@ -5745,9 +5824,15 @@ def main() -> None:
         BACKUP_RETENTION_COUNT,
     )
     st.session_state["auto_backup_error"] = backup_error
+    if st.session_state.pop("logout_requested", False):
+        st.session_state.pop("user", None)
+        st.session_state.pop("active_page", None)
+        st.session_state.pop("navigation_choice", None)
     if "user" not in st.session_state:
         login_screen()
         return
+
+    apply_theme_styles()
 
     user = st.session_state["user"]
     page = sidebar(user)
@@ -5770,8 +5855,6 @@ def main() -> None:
         render_users()
     elif page == "notifications":
         render_notifications(user)
-    elif page == "settings":
-        render_settings()
 
 
 if __name__ == "__main__":

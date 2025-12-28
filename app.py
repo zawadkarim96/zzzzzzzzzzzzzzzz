@@ -5341,8 +5341,13 @@ def dashboard(conn):
         if "show_deleted_panel" not in st.session_state:
             st.session_state.show_deleted_panel = False
 
-        excel_bytes = export_database_to_excel(conn)
-        archive_bytes = export_full_archive(conn, excel_bytes)
+        export_state = st.session_state.setdefault("admin_export_state", {})
+        if st.button("Prepare downloads", use_container_width=True):
+            excel_bytes = export_database_to_excel(conn)
+            export_state["excel_bytes"] = excel_bytes
+            export_state["archive_bytes"] = export_full_archive(conn, excel_bytes)
+        excel_bytes = export_state.get("excel_bytes")
+        archive_bytes = export_state.get("archive_bytes")
         download_cols = st.columns([0.5, 0.5])
         with download_cols[0]:
             st.download_button(
@@ -5350,6 +5355,10 @@ def dashboard(conn):
                 excel_bytes,
                 file_name="ps_crm.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                disabled=not excel_bytes,
+                help="Prepare downloads to enable export files."
+                if not excel_bytes
+                else None,
             )
         with download_cols[1]:
             st.download_button(
@@ -5358,6 +5367,7 @@ def dashboard(conn):
                 file_name="ps_crm_full.rar",
                 mime="application/x-rar-compressed",
                 help="Bundles the database, uploads, and receipts into one portable file.",
+                disabled=not archive_bytes,
             )
         backup_status = get_backup_status(BACKUP_DIR)
         if backup_status:
