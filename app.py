@@ -3861,16 +3861,90 @@ def set_theme(value: object) -> None:
 
 
 def apply_theme_css() -> None:
-    if get_theme() != "dark":
-        return
-    st.markdown(
-        """
-        <style>
-        [data-testid="stAppViewContainer"],
-        [data-testid="stSidebar"] {
-            background-color: #0e1117;
-            color: #fafafa;
+    theme = get_theme()
+    if theme == "dark":
+        colors = {
+            "bg": "#0e1117",
+            "sidebar_bg": "#0b1220",
+            "panel_bg": "#0f172a",
+            "panel_border": "#1f2937",
+            "text": "#f8fafc",
+            "muted": "#94a3b8",
+            "input_bg": "#111827",
+            "input_border": "#334155",
+            "accent": "#38bdf8",
+            "metric_bg": "rgba(255, 255, 255, 0.04)",
+            "metric_border": "rgba(250, 250, 250, 0.12)",
         }
+    else:
+        colors = {
+            "bg": "#ffffff",
+            "sidebar_bg": "#f8f9fb",
+            "panel_bg": "#ffffff",
+            "panel_border": "#e5e7eb",
+            "text": "#111827",
+            "muted": "#6b7280",
+            "input_bg": "#ffffff",
+            "input_border": "#d1d5db",
+            "accent": "#1d3b64",
+            "metric_bg": "#f7f9fc",
+            "metric_border": "rgba(49, 51, 63, 0.08)",
+        }
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --ps-bg: {colors['bg']};
+            --ps-sidebar-bg: {colors['sidebar_bg']};
+            --ps-panel-bg: {colors['panel_bg']};
+            --ps-panel-border: {colors['panel_border']};
+            --ps-text: {colors['text']};
+            --ps-muted: {colors['muted']};
+            --ps-input-bg: {colors['input_bg']};
+            --ps-input-border: {colors['input_border']};
+            --ps-accent: {colors['accent']};
+            --ps-metric-bg: {colors['metric_bg']};
+            --ps-metric-border: {colors['metric_border']};
+            color-scheme: {theme};
+        }}
+        body,
+        .stApp,
+        section.main {{
+            background-color: var(--ps-bg);
+            color: var(--ps-text);
+        }}
+        [data-testid="stAppViewContainer"],
+        [data-testid="stSidebar"] {{
+            background-color: var(--ps-bg);
+            color: var(--ps-text);
+        }}
+        [data-testid="stSidebar"] {{
+            background-color: var(--ps-sidebar-bg);
+        }}
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-testid="stDateInput"] input,
+        [data-testid="stNumberInput"] input {{
+            background-color: var(--ps-input-bg);
+            border-color: var(--ps-input-border);
+            color: var(--ps-text);
+        }}
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] span,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] label,
+        [data-testid="stMarkdownContainer"] h1,
+        [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stMarkdownContainer"] h3,
+        [data-testid="stMarkdownContainer"] h4,
+        [data-testid="stMarkdownContainer"] h5,
+        [data-testid="stMarkdownContainer"] h6 {{
+            color: var(--ps-text);
+        }}
+        [data-testid="stMetric"] {{
+            background: var(--ps-metric-bg);
+            border: 1px solid var(--ps-metric-border);
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -4578,11 +4652,15 @@ def init_ui():
     if "user" not in st.session_state:
         st.session_state.user = None
     if st.session_state.user:
+        st.set_option("client.toolbarMode", "viewer")
         st.title("PS Engineering – Business Suites")
         st.caption("Customers • Warranties • Needs • Summaries")
         st.markdown(
             """
             <style>
+            #MainMenu,
+            header,
+            div[data-testid="stToolbar"],
             div[data-testid="stStatusWidget"],
             div[data-testid="stDecoration"] {
                 display: none !important;
@@ -4595,35 +4673,29 @@ def init_ui():
         """
         <style>
         [data-testid="stMetric"] {
-            background: rgba(255, 255, 255, 0.04);
+            background: var(--ps-metric-bg);
             border-radius: 0.8rem;
             padding: 0.85rem;
-            border: 1px solid rgba(250, 250, 250, 0.12);
-        }
-        @media (prefers-color-scheme: light) {
-            [data-testid="stMetric"] {
-                background: #f7f9fc;
-                border: 1px solid rgba(49, 51, 63, 0.08);
-            }
+            border: 1px solid var(--ps-metric-border);
         }
         div[data-testid="stPopover"] > button {
             border: none !important;
             background: transparent !important;
             font-size: 1.25rem;
             padding: 0.15rem 0.35rem !important;
-            color: #1d3b64 !important;
+            color: var(--ps-accent) !important;
         }
         .ps-notification-popover {
             display: flex;
             justify-content: flex-end;
         }
         .ps-notification-popover button:hover {
-            background: rgba(29, 59, 100, 0.08) !important;
+            background: rgba(29, 59, 100, 0.12) !important;
         }
         .ps-notification-section-title {
             font-size: 0.9rem;
             font-weight: 600;
-            color: #1d3b64;
+            color: var(--ps-accent);
             margin-bottom: 0.25rem;
         }
         </style>
@@ -4641,16 +4713,15 @@ def _clear_session_for_logout() -> None:
         st.session_state[k] = val
 
 
+def _request_logout() -> None:
+    st.session_state["logout_requested"] = True
+
+
 def login_box(conn, *, render_id=None):
     apply_theme_css()
-    logout_button_key = f"sidebar_logout_main_{render_id or st.session_state.get('_render_id', 0)}"
     if st.session_state.user:
         st.sidebar.markdown("### Login")
         st.sidebar.success(f"Logged in as {st.session_state.user['username']} ({st.session_state.user['role']})")
-        if st.sidebar.button("Logout", key=logout_button_key):
-            # Ensure logout clears full session so auth gate can block dashboard.
-            _clear_session_for_logout()
-            st.rerun()
         return True
     # Hide Streamlit chrome on the login screen (auth gate UI only).
     st.set_option("client.toolbarMode", "viewer")
@@ -15199,6 +15270,9 @@ def reports_page(conn):
 
 # ---------- Main ----------
 def main():
+    if st.session_state.pop("logout_requested", False):
+        _clear_session_for_logout()
+        st.rerun()
     st.session_state["_render_id"] = st.session_state.get("_render_id", 0) + 1
     render_id = st.session_state["_render_id"]
     apply_theme_css()
@@ -15283,6 +15357,10 @@ def main():
         st.session_state["nav_page"] = page_choice
         page = page_choice
         st.session_state.page = page
+        st.divider()
+        if st.button("Logout", key="sidebar_logout_main", use_container_width=True):
+            _request_logout()
+            st.rerun()
 
     show_expiry_notifications(conn)
 
