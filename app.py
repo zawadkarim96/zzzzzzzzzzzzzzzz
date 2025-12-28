@@ -3873,6 +3873,13 @@ def apply_theme_css() -> None:
             "input_bg": "#111827",
             "input_border": "#334155",
             "accent": "#38bdf8",
+            "button_bg": "#111827",
+            "button_border": "#334155",
+            "button_text": "#f8fafc",
+            "button_hover": "#1f2937",
+            "button_primary_bg": "#38bdf8",
+            "button_primary_text": "#0b1220",
+            "button_primary_hover": "#0ea5e9",
             "metric_bg": "rgba(255, 255, 255, 0.04)",
             "metric_border": "rgba(250, 250, 250, 0.12)",
         }
@@ -3887,6 +3894,13 @@ def apply_theme_css() -> None:
             "input_bg": "#ffffff",
             "input_border": "#d1d5db",
             "accent": "#1d3b64",
+            "button_bg": "#ffffff",
+            "button_border": "#d1d5db",
+            "button_text": "#111827",
+            "button_hover": "#f3f4f6",
+            "button_primary_bg": "#1d3b64",
+            "button_primary_text": "#ffffff",
+            "button_primary_hover": "#1e4b82",
             "metric_bg": "#f7f9fc",
             "metric_border": "rgba(49, 51, 63, 0.08)",
         }
@@ -3905,6 +3919,13 @@ def apply_theme_css() -> None:
             --ps-accent: {colors['accent']};
             --ps-metric-bg: {colors['metric_bg']};
             --ps-metric-border: {colors['metric_border']};
+            --ps-button-bg: {colors['button_bg']};
+            --ps-button-border: {colors['button_border']};
+            --ps-button-text: {colors['button_text']};
+            --ps-button-hover: {colors['button_hover']};
+            --ps-button-primary-bg: {colors['button_primary_bg']};
+            --ps-button-primary-text: {colors['button_primary_text']};
+            --ps-button-primary-hover: {colors['button_primary_hover']};
             color-scheme: {theme};
         }}
         body,
@@ -3944,6 +3965,33 @@ def apply_theme_css() -> None:
         [data-testid="stMetric"] {{
             background: var(--ps-metric-bg);
             border: 1px solid var(--ps-metric-border);
+        }}
+        div[data-testid="stButton"] > button,
+        div[data-testid="stDownloadButton"] > button,
+        div[data-testid="stFormSubmitButton"] > button,
+        div[data-testid="stPopover"] button,
+        div[data-testid="stForm"] button {{
+            background-color: var(--ps-button-bg);
+            border-color: var(--ps-button-border);
+            color: var(--ps-button-text);
+        }}
+        div[data-testid="stButton"] > button:hover,
+        div[data-testid="stDownloadButton"] > button:hover,
+        div[data-testid="stFormSubmitButton"] > button:hover,
+        div[data-testid="stForm"] button:hover {{
+            background-color: var(--ps-button-hover);
+            border-color: var(--ps-button-border);
+            color: var(--ps-button-text);
+        }}
+        button[data-testid="baseButton-primary"] {{
+            background-color: var(--ps-button-primary-bg) !important;
+            border-color: var(--ps-button-primary-bg) !important;
+            color: var(--ps-button-primary-text) !important;
+        }}
+        button[data-testid="baseButton-primary"]:hover {{
+            background-color: var(--ps-button-primary-hover) !important;
+            border-color: var(--ps-button-primary-hover) !important;
+            color: var(--ps-button-primary-text) !important;
         }}
         </style>
         """,
