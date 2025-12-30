@@ -189,7 +189,7 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
             "follow_up_date",
             {"label": "Date", "type": "date", "format": "DD-MM-YYYY"},
         ),
-        ("client_name", {"label": "Client Name", "type": "text"}),
+        ("client_name", {"label": "Customer Name", "type": "text"}),
         ("address", {"label": "Address", "type": "text"}),
         ("contact", {"label": "Contact", "type": "text"}),
         ("product_detail", {"label": "Product Detail", "type": "text"}),
@@ -381,10 +381,24 @@ def _load_report_grid_dataframe(file_bytes: bytes, filename: str) -> Optional[pd
     buffer = io.BytesIO(file_bytes)
     try:
         if name.endswith(".csv"):
-            return pd.read_csv(buffer)
-        return pd.read_excel(buffer)
+            df = pd.read_csv(buffer)
+        else:
+            df = pd.read_excel(buffer)
     except Exception:
         return None
+    if df is None or df.empty:
+        return df
+    cleaned_columns: list[str] = []
+    for col in df.columns:
+        if pd.isna(col):
+            cleaned_columns.append("")
+        else:
+            cleaned_columns.append(str(col).strip())
+    df.columns = cleaned_columns
+    unnamed_mask = df.columns.to_series().str.lower().str.startswith("unnamed")
+    df = df.loc[:, ~unnamed_mask]
+    df = df.loc[:, df.columns != ""]
+    return df
 
 
 def _import_report_grid_from_dataframe(
@@ -16523,6 +16537,35 @@ def reports_page(conn):
         except OSError:
             existing_import_bytes = None
 
+    if existing_attachment_value:
+        st.caption("Current attachment")
+        if existing_attachment_bytes and existing_attachment_name:
+            st.download_button(
+                "Download current attachment",
+                data=existing_attachment_bytes,
+                file_name=existing_attachment_name,
+                key="report_attachment_download",
+            )
+        else:
+            st.warning(
+                "The saved attachment could not be located on disk.",
+                icon="⚠️",
+            )
+    if existing_import_value:
+        st.caption("Imported file")
+        if existing_import_bytes and existing_import_name:
+            st.download_button(
+                "Download imported file",
+                data=existing_import_bytes,
+                file_name=existing_import_name,
+                key="report_import_download",
+            )
+        else:
+            st.warning(
+                "The saved import file could not be located on disk.",
+                icon="⚠️",
+            )
+
     with st.form("work_report_form"):
         period_choice = st.selectbox(
             "Report cadence",
@@ -16631,37 +16674,10 @@ def reports_page(conn):
         remove_attachment = False
         attachment_upload = None
         if existing_attachment_value:
-            st.caption("Current attachment")
-            if existing_attachment_bytes and existing_attachment_name:
-                st.download_button(
-                    "Download current attachment",
-                    data=existing_attachment_bytes,
-                    file_name=existing_attachment_name,
-                    key="report_attachment_download",
-                )
-            else:
-                st.warning(
-                    "The saved attachment could not be located on disk.",
-                    icon="⚠️",
-                )
             remove_attachment = st.checkbox(
                 "Remove current attachment",
                 key="report_remove_attachment",
             )
-        if existing_import_value:
-            st.caption("Imported file")
-            if existing_import_bytes and existing_import_name:
-                st.download_button(
-                    "Download imported file",
-                    data=existing_import_bytes,
-                    file_name=existing_import_name,
-                    key="report_import_download",
-                )
-            else:
-                st.warning(
-                    "The saved import file could not be located on disk.",
-                    icon="⚠️",
-                )
         attachment_upload = st.file_uploader(
             "Attach supporting document (PDF, image, or Excel)",
             type=["pdf", "png", "jpg", "jpeg", "webp", "gif", "xlsx", "xls"],
