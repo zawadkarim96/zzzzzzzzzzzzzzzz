@@ -477,6 +477,91 @@ def _is_lead_customer(remarks: Optional[str]) -> bool:
     normalized = clean_text(remarks).lower()
     return "lead / chasing" in normalized or "lead: chasing" in normalized
 
+
+def _strip_lead_tag(remarks: Optional[str]) -> Optional[str]:
+    if not remarks:
+        return None
+    parts = [part.strip() for part in remarks.split("|")]
+    cleaned_parts = []
+    for part in parts:
+        if not part:
+            continue
+        if _is_lead_customer(part):
+            continue
+        cleaned_parts.append(part)
+    cleaned = " | ".join(cleaned_parts).strip()
+    return cleaned or None
+
+
+def _promote_lead_customer(
+    conn,
+    *,
+    name: Optional[str],
+    company: Optional[str],
+    phone: Optional[str],
+) -> bool:
+    customer_name = clean_text(name)
+    company_name = clean_text(company)
+    phone_number = clean_text(phone)
+
+    if not any([customer_name, company_name, phone_number]):
+        return False
+
+    cursor = conn.cursor()
+
+    def _fetch_existing(query: str, params: tuple[object, ...]):
+        return cursor.execute(query, params).fetchone()
+
+    existing = None
+    if phone_number:
+        existing = _fetch_existing(
+            """
+            SELECT customer_id, remarks
+            FROM customers
+            WHERE TRIM(IFNULL(phone, '')) = ?
+            ORDER BY customer_id DESC
+            LIMIT 1
+            """,
+            (phone_number,),
+        )
+    if existing is None and company_name:
+        existing = _fetch_existing(
+            """
+            SELECT customer_id, remarks
+            FROM customers
+            WHERE LOWER(IFNULL(company_name, '')) = LOWER(?)
+            ORDER BY customer_id DESC
+            LIMIT 1
+            """,
+            (company_name,),
+        )
+    if existing is None and customer_name:
+        existing = _fetch_existing(
+            """
+            SELECT customer_id, remarks
+            FROM customers
+            WHERE LOWER(IFNULL(name, '')) = LOWER(?)
+            ORDER BY customer_id DESC
+            LIMIT 1
+            """,
+            (customer_name,),
+        )
+
+    if not existing:
+        return False
+
+    customer_id, remarks = existing
+    if not _is_lead_customer(remarks):
+        return False
+
+    cleaned = _strip_lead_tag(remarks)
+    cursor.execute(
+        "UPDATE customers SET remarks=? WHERE customer_id=?",
+        (cleaned, customer_id),
+    )
+    conn.commit()
+    return True
+
 # ---------- Schema ----------
 ADMIN_DEFAULT_PASSWORD = "PANNAPS123"
 
@@ -10506,7 +10591,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
         cur = conn.execute(
             """
             SELECT status, follow_up_status, follow_up_notes, follow_up_date, reminder_label,
-                   payment_receipt_path, reference
+                   payment_receipt_path, reference, customer_name, customer_company, customer_contact
             FROM quotations
             WHERE quotation_id=?
             """,
@@ -10515,23 +10600,41 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
         row = cur.fetchone()
         if not row:
             continue
-        current_status = clean_text(row[0]) or "pending"
+        (
+            current_status,
+            current_follow_up_status,
+            current_follow_up_notes,
+            current_follow_up_date,
+            current_reminder_label,
+            current_receipt_path,
+            current_reference,
+            customer_name,
+            customer_company,
+            customer_contact,
+        ) = row
+        current_status = clean_text(current_status) or "pending"
         if current_status in {"paid", "rejected"}:
             locked.append(quotation_id)
             continue
         status_value = clean_text(entry.get("status")) or current_status
-        follow_up_status = clean_text(entry.get("follow_up_status")) or clean_text(row[1])
-        follow_up_notes = clean_text(entry.get("follow_up_notes")) or clean_text(row[2])
+        follow_up_status = clean_text(entry.get("follow_up_status")) or clean_text(
+            current_follow_up_status
+        )
+        follow_up_notes = clean_text(entry.get("follow_up_notes")) or clean_text(
+            current_follow_up_notes
+        )
         follow_up_date = None
         if status_value != "paid":
-            follow_up_date = to_iso_date(entry.get("follow_up_date") or row[3])
+            follow_up_date = to_iso_date(entry.get("follow_up_date") or current_follow_up_date)
         reminder_label = (
             "Payment marked as received; follow-up reminders disabled."
             if status_value == "paid"
             else clean_text(entry.get("reminder_label"))
-            or clean_text(row[4])
+            or clean_text(current_reminder_label)
         )
-        receipt_path = clean_text(entry.get("payment_receipt_path")) or clean_text(row[5])
+        receipt_path = clean_text(entry.get("payment_receipt_path")) or clean_text(
+            current_receipt_path
+        )
         if status_value == "paid" and not receipt_path:
             locked.append(quotation_id)
             continue
@@ -10558,7 +10661,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
             ),
         )
         updated.append(quotation_id)
-        reference_label = clean_text(row[6]) or f"Quotation #{quotation_id}"
+        reference_label = clean_text(current_reference) or f"Quotation #{quotation_id}"
         if status_value != current_status:
             receipt_note = " with receipt" if receipt_path and status_value == "paid" else ""
             log_activity(
@@ -10567,6 +10670,13 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
                 description=f"{reference_label} marked as {status_value}{receipt_note}",
                 entity_type="quotation",
                 entity_id=quotation_id,
+            )
+        if status_value == "paid" and status_value != current_status:
+            _promote_lead_customer(
+                conn,
+                name=customer_name,
+                company=customer_company,
+                phone=customer_contact,
             )
     conn.commit()
     return {"updated": updated, "locked": locked}
@@ -11051,6 +11161,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
         }
         record_id = _save_quotation_record(conn, payload)
         if clean_text(customer_company):
+            lead_status = LEAD_REMARK_TAG if status_value != "paid" else None
             _upsert_customer_from_manual_quotation(
                 conn,
                 name=customer_contact_name,
@@ -11060,8 +11171,15 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 district=customer_district,
                 reference=reference_value,
                 created_by=current_user_id(),
-                lead_status=LEAD_REMARK_TAG,
+                lead_status=lead_status,
             )
+            if status_value == "paid":
+                _promote_lead_customer(
+                    conn,
+                    name=customer_contact_name,
+                    company=customer_company,
+                    phone=customer_contact,
+                )
 
         st.session_state[result_key] = {
             "display": display_df,
