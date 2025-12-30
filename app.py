@@ -99,34 +99,172 @@ REPORT_PERIOD_OPTIONS = OrderedDict(
     ]
 )
 
-REPORT_GRID_FIELDS = OrderedDict(
+SERVICE_REPORT_FIELDS = OrderedDict(
     [
-        ("customer_name", {"label": "Customer Name", "type": "text"}),
+        (
+            "customer_name",
+            {
+                "label": "Customer Name",
+                "type": "text",
+                "help": "Who received the service work.",
+            },
+        ),
         (
             "reported_complaints",
-            {"label": "Reported Complaints", "type": "text"},
+            {
+                "label": "Reported Complaints",
+                "type": "text",
+                "help": "Issues raised by the customer.",
+            },
         ),
-        ("product_details", {"label": "Product Details", "type": "text"}),
-        ("details_remarks", {"label": "Details Remarks", "type": "text"}),
-        ("status", {"label": "Status", "type": "text"}),
-        ("quotation_tk", {"label": "Quotation Tk", "type": "number"}),
-        ("bill_tk", {"label": "Bill TK", "type": "number"}),
-        ("work_done_date", {"label": "Work Done Date", "type": "date"}),
-        ("donation_cost", {"label": "Donation Cost", "type": "number"}),
+        (
+            "product_details",
+            {
+                "label": "Product Details",
+                "type": "text",
+                "help": "Model, serial, or generator description.",
+            },
+        ),
+        (
+            "details_remarks",
+            {
+                "label": "Details Remarks",
+                "type": "text",
+                "help": "Technician notes or actions taken.",
+            },
+        ),
+        (
+            "status",
+            {
+                "label": "Status",
+                "type": "text",
+                "help": "Current job status (e.g. Completed, Pending).",
+            },
+        ),
+        (
+            "quotation_tk",
+            {
+                "label": "Quotation Tk",
+                "type": "number",
+                "format": "%.2f",
+                "step": 100.0,
+                "help": "Quoted amount in Taka.",
+            },
+        ),
+        (
+            "bill_tk",
+            {
+                "label": "Bill TK",
+                "type": "number",
+                "format": "%.2f",
+                "step": 100.0,
+                "help": "Billed amount in Taka.",
+            },
+        ),
+        (
+            "work_done_date",
+            {
+                "label": "Work Done Date",
+                "type": "date",
+                "format": "DD-MM-YYYY",
+                "help": "When the work was completed.",
+            },
+        ),
+        (
+            "donation_cost",
+            {
+                "label": "Donation Cost",
+                "type": "number",
+                "format": "%.2f",
+                "step": 100.0,
+                "help": "Any donation or complimentary cost.",
+            },
+        ),
     ]
 )
 
-REPORT_GRID_DISPLAY_COLUMNS = [
-    config["label"] for config in REPORT_GRID_FIELDS.values()
-]
+FOLLOW_UP_REPORT_FIELDS = OrderedDict(
+    [
+        (
+            "follow_up_date",
+            {"label": "Date", "type": "date", "format": "DD-MM-YYYY"},
+        ),
+        ("client_name", {"label": "Client Name", "type": "text"}),
+        ("address", {"label": "Address", "type": "text"}),
+        ("contact", {"label": "Contact", "type": "text"}),
+        ("product_detail", {"label": "Product Detail", "type": "text"}),
+        ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
+        ("status", {"label": "Status", "type": "text"}),
+        ("notes", {"label": "Notes", "type": "text"}),
+        ("person_in_charge", {"label": "Person In Charge", "type": "text"}),
+    ]
+)
+
+REPORT_GRID_FIELDS = SERVICE_REPORT_FIELDS
+
+REPORT_TEMPLATE_LABELS = OrderedDict(
+    [
+        ("service", "Service report"),
+        ("follow_up", "Follow-up report"),
+    ]
+)
+
+REPORT_TEMPLATE_FIELDS = OrderedDict(
+    [
+        ("service", SERVICE_REPORT_FIELDS),
+        ("follow_up", FOLLOW_UP_REPORT_FIELDS),
+    ]
+)
+
+REPORT_TEMPLATE_SUMMARY_FIELDS = {
+    "service": {
+        "tasks": "reported_complaints",
+        "remarks": "details_remarks",
+        "research": "product_details",
+    },
+    "follow_up": {
+        "tasks": "notes",
+        "remarks": "status",
+        "research": "product_detail",
+    },
+}
+
+REPORT_TEMPLATE_DISPLAY_COLUMNS = {
+    key: [config["label"] for config in fields.values()]
+    for key, fields in REPORT_TEMPLATE_FIELDS.items()
+}
+
+REPORT_GRID_DISPLAY_COLUMNS = REPORT_TEMPLATE_DISPLAY_COLUMNS["service"]
+ALL_REPORT_DISPLAY_COLUMNS: list[str] = []
+for template_columns in REPORT_TEMPLATE_DISPLAY_COLUMNS.values():
+    for column in template_columns:
+        if column not in ALL_REPORT_DISPLAY_COLUMNS:
+            ALL_REPORT_DISPLAY_COLUMNS.append(column)
 
 _quotation_editor_server: Optional[http.server.ThreadingHTTPServer] = None
 _quotation_editor_thread: Optional[threading.Thread] = None
 
 
-def _default_report_grid_row() -> dict[str, object]:
+def _normalize_report_template(value: Optional[str]) -> str:
+    normalized = (clean_text(value) or "").lower().replace(" ", "_")
+    if normalized in REPORT_TEMPLATE_FIELDS:
+        return normalized
+    return "service"
+
+
+def _get_report_grid_fields(template_key: Optional[str] = None) -> OrderedDict:
+    normalized = _normalize_report_template(template_key)
+    return REPORT_TEMPLATE_FIELDS.get(normalized, REPORT_GRID_FIELDS)
+
+
+def _get_report_display_columns(template_key: Optional[str] = None) -> list[str]:
+    normalized = _normalize_report_template(template_key)
+    return REPORT_TEMPLATE_DISPLAY_COLUMNS.get(normalized, REPORT_GRID_DISPLAY_COLUMNS)
+
+
+def _default_report_grid_row(template_key: Optional[str] = None) -> dict[str, object]:
     row: dict[str, object] = {}
-    for key, config in REPORT_GRID_FIELDS.items():
+    for key, config in _get_report_grid_fields(template_key).items():
         if config["type"] == "number":
             row[key] = None
         else:
@@ -157,15 +295,20 @@ def _coerce_grid_number(value) -> Optional[float]:
         return None
 
 
-def _normalize_grid_rows(rows: Iterable[dict]) -> list[dict[str, object]]:
+def _normalize_grid_rows(
+    rows: Iterable[dict],
+    *,
+    template_key: Optional[str] = None,
+) -> list[dict[str, object]]:
     normalized: list[dict[str, object]] = []
     if not rows:
         return normalized
+    fields = _get_report_grid_fields(template_key)
     for raw in rows:
         if not isinstance(raw, dict):
             continue
         entry: dict[str, object] = {}
-        for key, config in REPORT_GRID_FIELDS.items():
+        for key, config in fields.items():
             value = raw.get(key)
             if config["type"] == "text":
                 entry[key] = clean_text(value)
@@ -180,7 +323,11 @@ def _normalize_grid_rows(rows: Iterable[dict]) -> list[dict[str, object]]:
     return normalized
 
 
-def parse_report_grid_payload(value: Optional[str]) -> list[dict[str, object]]:
+def parse_report_grid_payload(
+    value: Optional[str],
+    *,
+    template_key: Optional[str] = None,
+) -> list[dict[str, object]]:
     text = clean_text(value)
     if not text:
         return []
@@ -189,12 +336,14 @@ def parse_report_grid_payload(value: Optional[str]) -> list[dict[str, object]]:
     except (TypeError, ValueError):
         return []
     if isinstance(parsed, list):
-        return _normalize_grid_rows(parsed)
+        return _normalize_grid_rows(parsed, template_key=template_key)
     return []
 
 
-def prepare_report_grid_payload(rows: Iterable[dict]) -> Optional[str]:
-    normalized = _normalize_grid_rows(rows)
+def prepare_report_grid_payload(
+    rows: Iterable[dict], *, template_key: Optional[str] = None
+) -> Optional[str]:
+    normalized = _normalize_grid_rows(rows, template_key=template_key)
     if not normalized:
         return None
     return json.dumps(normalized, ensure_ascii=False)
@@ -204,11 +353,13 @@ def _normalize_header(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
 
 
-def _suggest_report_column_mapping(columns: Iterable[str]) -> dict[str, str]:
+def _suggest_report_column_mapping(
+    columns: Iterable[str], *, template_key: Optional[str] = None
+) -> dict[str, str]:
     """Suggest a mapping from target fields to uploaded columns."""
 
     header_map: dict[str, str] = {}
-    for key, config in REPORT_GRID_FIELDS.items():
+    for key, config in _get_report_grid_fields(template_key).items():
         header_map[_normalize_header(key)] = key
         header_map[_normalize_header(config["label"])] = key
 
@@ -237,7 +388,10 @@ def _load_report_grid_dataframe(file_bytes: bytes, filename: str) -> Optional[pd
 
 
 def _import_report_grid_from_dataframe(
-    raw_df: Optional[pd.DataFrame], column_mapping: Optional[dict[str, str]] = None
+    raw_df: Optional[pd.DataFrame],
+    column_mapping: Optional[dict[str, str]] = None,
+    *,
+    template_key: Optional[str] = None,
 ) -> list[dict[str, object]]:
     """Parse a DataFrame into report grid rows with optional custom mapping."""
 
@@ -245,15 +399,16 @@ def _import_report_grid_from_dataframe(
     if raw_df is None or raw_df.empty:
         return imported_rows
 
+    fields = _get_report_grid_fields(template_key)
     header_map: dict[str, str] = {}
-    for key, config in REPORT_GRID_FIELDS.items():
+    for key, config in fields.items():
         header_map[_normalize_header(key)] = key
         header_map[_normalize_header(config["label"])] = key
 
     resolved_mapping: dict[str, str] = {}
     if column_mapping:
         for source, target in column_mapping.items():
-            if source in raw_df.columns and target in REPORT_GRID_FIELDS:
+            if source in raw_df.columns and target in fields:
                 resolved_mapping[source] = target
 
     if not resolved_mapping:
@@ -267,10 +422,10 @@ def _import_report_grid_from_dataframe(
         return imported_rows
 
     for _, row in raw_df.iterrows():
-        entry = _default_report_grid_row()
+        entry = _default_report_grid_row(template_key)
         for source, target in resolved_mapping.items():
             value = row.get(source)
-            config = REPORT_GRID_FIELDS.get(target, {})
+            config = fields.get(target, {})
             if config.get("type") == "number":
                 entry[target] = _coerce_grid_number(value)
             elif config.get("type") == "date":
@@ -302,17 +457,22 @@ def _import_report_grid_from_file(
 
 
 def format_report_grid_rows_for_display(
-    rows: Iterable[dict], *, empty_ok: bool = False
+    rows: Iterable[dict],
+    *,
+    empty_ok: bool = False,
+    template_key: Optional[str] = None,
 ) -> pd.DataFrame:
-    normalized = _normalize_grid_rows(rows)
+    normalized = _normalize_grid_rows(rows, template_key=template_key)
+    display_columns = _get_report_display_columns(template_key)
     if not normalized and not empty_ok:
-        return pd.DataFrame(columns=REPORT_GRID_DISPLAY_COLUMNS)
+        return pd.DataFrame(columns=display_columns)
     if not normalized:
         normalized = []
     formatted: list[dict[str, object]] = []
+    fields = _get_report_grid_fields(template_key)
     for entry in normalized:
         display_row: dict[str, object] = {}
-        for key, config in REPORT_GRID_FIELDS.items():
+        for key, config in fields.items():
             label = config["label"]
             value = entry.get(key)
             if config["type"] == "text":
@@ -333,15 +493,17 @@ def format_report_grid_rows_for_display(
                 display_row[label] = value
         formatted.append(display_row)
     if not formatted:
-        return pd.DataFrame(columns=REPORT_GRID_DISPLAY_COLUMNS)
+        return pd.DataFrame(columns=display_columns)
     df = pd.DataFrame(formatted)
-    return df.reindex(columns=REPORT_GRID_DISPLAY_COLUMNS)
+    return df.reindex(columns=display_columns)
 
 
-def _grid_rows_for_editor(rows: Iterable[dict]) -> list[dict[str, object]]:
+def _grid_rows_for_editor(
+    rows: Iterable[dict], *, template_key: Optional[str] = None
+) -> list[dict[str, object]]:
     """Coerce stored report rows into a format suitable for the data editor."""
 
-    normalized = _normalize_grid_rows(rows)
+    normalized = _normalize_grid_rows(rows, template_key=template_key)
     source_rows: list[dict[str, object]]
     if normalized:
         source_rows = normalized
@@ -351,9 +513,10 @@ def _grid_rows_for_editor(rows: Iterable[dict]) -> list[dict[str, object]]:
         return []
 
     editor_rows: list[dict[str, object]] = []
+    fields = _get_report_grid_fields(template_key)
     for entry in source_rows:
         editor_entry: dict[str, object] = {}
-        for key, config in REPORT_GRID_FIELDS.items():
+        for key, config in fields.items():
             value = entry.get(key)
             if config["type"] == "text":
                 editor_entry[key] = clean_text(value) or ""
@@ -376,7 +539,9 @@ def _grid_rows_for_editor(rows: Iterable[dict]) -> list[dict[str, object]]:
     return editor_rows
 
 
-def _grid_rows_from_editor(df: Optional[pd.DataFrame]) -> list[dict[str, object]]:
+def _grid_rows_from_editor(
+    df: Optional[pd.DataFrame], *, template_key: Optional[str] = None
+) -> list[dict[str, object]]:
     """Normalize rows captured from the Streamlit data editor widget."""
 
     if df is None or not isinstance(df, pd.DataFrame):
@@ -385,7 +550,32 @@ def _grid_rows_from_editor(df: Optional[pd.DataFrame]) -> list[dict[str, object]
         records = df.to_dict("records")
     except Exception:
         return []
-    return _normalize_grid_rows(records)
+    return _normalize_grid_rows(records, template_key=template_key)
+
+
+def _build_report_column_config(
+    fields: Mapping[str, dict[str, object]]
+) -> dict[str, object]:
+    column_config: dict[str, object] = {}
+    for key, config in fields.items():
+        label = config.get("label", key)
+        help_text = config.get("help")
+        if config.get("type") == "number":
+            column_config[key] = st.column_config.NumberColumn(
+                label,
+                help=help_text,
+                format=config.get("format"),
+                step=config.get("step"),
+            )
+        elif config.get("type") == "date":
+            column_config[key] = st.column_config.DateColumn(
+                label,
+                help=help_text,
+                format=config.get("format", "DD-MM-YYYY"),
+            )
+        else:
+            column_config[key] = st.column_config.TextColumn(label, help=help_text)
+    return column_config
 
 
 def _summarize_grid_column(rows: Iterable[dict[str, object]], key: str) -> Optional[str]:
@@ -750,6 +940,7 @@ CREATE TABLE IF NOT EXISTS work_reports (
     research TEXT,
     grid_payload TEXT,
     attachment_path TEXT,
+    report_template TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
@@ -928,6 +1119,7 @@ def ensure_schema_upgrades(conn):
     add_column("import_history", "quantity", "INTEGER DEFAULT 1")
     add_column("work_reports", "grid_payload", "TEXT")
     add_column("work_reports", "attachment_path", "TEXT")
+    add_column("work_reports", "report_template", "TEXT")
     add_column("service_documents", "uploaded_by", "INTEGER")
     add_column("maintenance_documents", "uploaded_by", "INTEGER")
     add_column("quotations", "salesperson_email", "TEXT")
@@ -5908,7 +6100,9 @@ def dashboard(conn):
                                tasks,
                                remarks,
                                research,
+                               grid_payload,
                                attachment_path,
+                               report_template,
                                period_start,
                                period_end,
                                created_at,
@@ -5939,6 +6133,13 @@ def dashboard(conn):
                         )
                 else:
                     record = report_detail.iloc[0].to_dict()
+                    template_key = _normalize_report_template(
+                        record.get("report_template")
+                    )
+                    template_label = REPORT_TEMPLATE_LABELS.get(
+                        template_key, "Service report"
+                    )
+                    st.markdown(f"**Template:** {template_label}")
                     st.markdown(
                         f"**Period:** {format_period_range(record.get('period_start'), record.get('period_end'))}"
                     )
@@ -5950,28 +6151,65 @@ def dashboard(conn):
                         format_time_ago(record.get("updated_at"))
                         or format_period_range(record.get("updated_at"), record.get("updated_at"))
                     )
-                    st.markdown("**Tasks completed**")
+                    grid_rows = parse_report_grid_payload(
+                        record.get("grid_payload"), template_key=template_key
+                    )
+                    grid_df = format_report_grid_rows_for_display(
+                        grid_rows, empty_ok=True, template_key=template_key
+                    )
+                    if not grid_df.empty:
+                        st.markdown("**Submitted entries**")
+                        st.dataframe(grid_df, use_container_width=True, hide_index=True)
+                    summary_labels = {
+                        "service": {
+                            "tasks": "Tasks completed",
+                            "remarks": "Remarks / blockers",
+                            "research": "Research / learnings",
+                        },
+                        "follow_up": {
+                            "tasks": "Notes",
+                            "remarks": "Status",
+                            "research": "Product detail",
+                        },
+                    }
+                    label_map = summary_labels.get(
+                        template_key, summary_labels["service"]
+                    )
+                    st.markdown(f"**{label_map['tasks']}**")
                     st.write(clean_text(record.get("tasks")) or "—")
-                    st.markdown("**Remarks / blockers**")
+                    st.markdown(f"**{label_map['remarks']}**")
                     st.write(clean_text(record.get("remarks")) or "—")
-                    st.markdown("**Research / learnings**")
+                    st.markdown(f"**{label_map['research']}**")
                     st.write(clean_text(record.get("research")) or "—")
                     summary_lines = [
                         f"Daily submission for {selected_staff_name}",
+                        f"Template: {template_label}",
                         f"Date: {format_period_range(record.get('period_start'), record.get('period_end'))}",
                         "",
-                        "Tasks completed:",
+                        f"{label_map['tasks']}:",
                         clean_text(record.get("tasks")) or "—",
                         "",
-                        "Remarks / blockers:",
+                        f"{label_map['remarks']}:",
                         clean_text(record.get("remarks")) or "—",
                         "",
-                        "Research / learnings:",
+                        f"{label_map['research']}:",
                         clean_text(record.get("research")) or "—",
                         "",
+                    ]
+                    if not grid_df.empty:
+                        summary_lines.extend(
+                            [
+                                "Entries:",
+                                grid_df.to_csv(index=False).strip(),
+                                "",
+                            ]
+                        )
+                    summary_lines.extend(
+                        [
                         f"Submitted: {submitted_label}",
                         f"Last updated: {updated_label}",
-                    ]
+                        ]
+                    )
                     summary_payload = "\n".join(summary_lines)
                     download_name = _sanitize_path_component(
                         f"daily_submission_{selected_staff_name}_{report_iso}"
@@ -6033,6 +6271,7 @@ def dashboard(conn):
                    wr.period_start,
                    wr.period_end,
                    wr.created_at,
+                   wr.report_template,
                    COALESCE(u.username, 'User #' || wr.user_id) AS owner
             FROM work_reports wr
             LEFT JOIN users u ON u.user_id = wr.user_id
@@ -6046,6 +6285,11 @@ def dashboard(conn):
 
     if not recent_reports.empty:
         st.markdown("#### Recent report submissions")
+        recent_reports["Template"] = recent_reports["report_template"].apply(
+            lambda value: REPORT_TEMPLATE_LABELS.get(
+                _normalize_report_template(value), "Service report"
+            )
+        )
         recent_reports["Period"] = recent_reports.apply(
             lambda row: format_period_range(row.get("period_start"), row.get("period_end")),
             axis=1,
@@ -6056,7 +6300,7 @@ def dashboard(conn):
         recent_reports["When"] = recent_reports["created_at"].apply(
             lambda value: format_time_ago(value) or format_period_range(value, value)
         )
-        display_cols = ["Team member", "Cadence", "Period", "When"]
+        display_cols = ["Team member", "Template", "Cadence", "Period", "When"]
         recent_display = recent_reports.rename(columns={"owner": "Team member"})
         st.dataframe(
             recent_display[display_cols],
@@ -6074,6 +6318,7 @@ def dashboard(conn):
                    wr.attachment_path,
                    wr.period_start,
                    wr.period_end,
+                   wr.report_template,
                    COALESCE(u.username, 'User #' || wr.user_id) AS owner,
                    wr.created_at
             FROM work_reports wr
@@ -6089,6 +6334,11 @@ def dashboard(conn):
 
     if not uploads_df.empty:
         st.markdown("#### Latest report uploads")
+        uploads_df["Template"] = uploads_df["report_template"].apply(
+            lambda value: REPORT_TEMPLATE_LABELS.get(
+                _normalize_report_template(value), "Service report"
+            )
+        )
         uploads_df["Period"] = uploads_df.apply(
             lambda row: format_period_range(row.get("period_start"), row.get("period_end")),
             axis=1,
@@ -6107,7 +6357,9 @@ def dashboard(conn):
                 payload = path.read_bytes()
             except OSError:
                 continue
-            label = f"{row.get('owner')} • {row.get('Period')}"
+            label = (
+                f"{row.get('owner')} • {row.get('Template')} • {row.get('Period')}"
+            )
             st.download_button(
                 label,
                 data=payload,
@@ -14792,6 +15044,7 @@ def upsert_work_report(
     tasks: Optional[str],
     remarks: Optional[str],
     research: Optional[str],
+    report_template: Optional[str] = None,
     grid_rows: Optional[Iterable[dict]] = None,
     attachment_path=_ATTACHMENT_UNCHANGED,
     current_attachment: Optional[str] = None,
@@ -14808,7 +15061,10 @@ def upsert_work_report(
     tasks_val = _normalize_report_text(tasks)
     remarks_val = _normalize_report_text(remarks)
     research_val = _normalize_report_text(research)
-    grid_payload_val = prepare_report_grid_payload(grid_rows or [])
+    template_key = _normalize_report_template(report_template)
+    grid_payload_val = prepare_report_grid_payload(
+        grid_rows or [], template_key=template_key
+    )
 
     cur = conn.cursor()
     effective_id = report_id
@@ -14852,8 +15108,8 @@ def upsert_work_report(
         try:
             cur.execute(
                 """
-                INSERT INTO work_reports (user_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO work_reports (user_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, report_template)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -14865,6 +15121,7 @@ def upsert_work_report(
                     research_val,
                     grid_payload_val,
                     attachment_value,
+                    template_key,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -14878,7 +15135,7 @@ def upsert_work_report(
             cur.execute(
                 """
                 UPDATE work_reports
-                SET period_type=?, period_start=?, period_end=?, tasks=?, remarks=?, research=?, grid_payload=?, attachment_path=?, updated_at=datetime('now')
+                SET period_type=?, period_start=?, period_end=?, tasks=?, remarks=?, research=?, grid_payload=?, attachment_path=?, report_template=?, updated_at=datetime('now')
                 WHERE report_id=?
                 """,
                 (
@@ -14890,6 +15147,7 @@ def upsert_work_report(
                     research_val,
                     grid_payload_val,
                     attachment_value,
+                    template_key,
                     effective_id,
                 ),
             )
@@ -15215,7 +15473,7 @@ def reports_page(conn):
         conn,
         dedent(
             """
-            SELECT report_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, created_at, updated_at
+            SELECT report_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, report_template, created_at, updated_at
             FROM work_reports
             WHERE user_id=?
             ORDER BY date(period_start) DESC, report_id DESC
@@ -15308,6 +15566,42 @@ def reports_page(conn):
         ]
         if not match.empty:
             editing_record = match.iloc[0].to_dict()
+    template_key = _normalize_report_template(
+        editing_record.get("report_template") if editing_record else None
+    )
+    if not editing_record:
+        template_key = _normalize_report_template(
+            st.session_state.get("report_template_select")
+        )
+        template_key = template_key or "service"
+        template_options = list(REPORT_TEMPLATE_LABELS.keys())
+        template_index = template_options.index(template_key)
+        template_key = st.selectbox(
+            "Report template",
+            template_options,
+            index=template_index,
+            format_func=lambda key: REPORT_TEMPLATE_LABELS.get(
+                key, key.replace("_", " ").title()
+            ),
+            key="report_template_select",
+        )
+    else:
+        st.selectbox(
+            "Report template",
+            list(REPORT_TEMPLATE_LABELS.keys()),
+            index=list(REPORT_TEMPLATE_LABELS.keys()).index(template_key),
+            format_func=lambda key: REPORT_TEMPLATE_LABELS.get(
+                key, key.replace("_", " ").title()
+            ),
+            key="report_template_select",
+            disabled=True,
+        )
+    if st.session_state.get("report_template_current") != template_key:
+        st.session_state["report_template_current"] = template_key
+        st.session_state.pop("report_grid_import_rows", None)
+        st.session_state.pop("report_grid_import_payload", None)
+        st.session_state.pop("report_grid_mapping_choices", None)
+        st.session_state.pop("report_grid_editor_state", None)
     default_period_key = "daily"
     if editing_record:
         seed_period = clean_text(editing_record.get("period_type"))
@@ -15367,11 +15661,13 @@ def reports_page(conn):
             import_payload.get("data", b""), import_payload.get("name", "")
         )
         if uploaded_df is not None:
-            suggestions = _suggest_report_column_mapping(uploaded_df.columns)
+            suggestions = _suggest_report_column_mapping(
+                uploaded_df.columns, template_key=template_key
+            )
             if suggestions and import_file is not None:
                 auto_mapping = {source: target for target, source in suggestions.items()}
                 imported_rows = _import_report_grid_from_dataframe(
-                    uploaded_df, auto_mapping
+                    uploaded_df, auto_mapping, template_key=template_key
                 )
                 if imported_rows:
                     st.session_state["report_grid_import_rows"] = imported_rows
@@ -15391,7 +15687,7 @@ def reports_page(conn):
                     "Align columns from the uploaded file to the report grid fields. Skipped columns will be ignored."
                 )
                 selected_mapping: dict[str, str] = {}
-                for key, config in REPORT_GRID_FIELDS.items():
+                for key, config in _get_report_grid_fields(template_key).items():
                     default_choice = mapping_seed.get(key) or suggestions.get(key)
                     if default_choice not in map_options:
                         default_choice = "(Do not import)"
@@ -15411,10 +15707,10 @@ def reports_page(conn):
             if load_clicked:
                 st.session_state["report_grid_mapping_choices"] = {
                     key: st.session_state.get(f"report_map_{key}")
-                    for key in REPORT_GRID_FIELDS.keys()
+                    for key in _get_report_grid_fields(template_key).keys()
                 }
                 imported_rows = _import_report_grid_from_dataframe(
-                    uploaded_df, selected_mapping
+                    uploaded_df, selected_mapping, template_key=template_key
                 )
                 if imported_rows:
                     st.session_state["report_grid_import_rows"] = imported_rows
@@ -15433,7 +15729,9 @@ def reports_page(conn):
             )
 
     grid_seed_rows = (
-        parse_report_grid_payload(editing_record.get("grid_payload"))
+        parse_report_grid_payload(
+            editing_record.get("grid_payload"), template_key=template_key
+        )
         if editing_record
         else []
     )
@@ -15442,15 +15740,16 @@ def reports_page(conn):
     elif st.session_state.get("report_grid_editor_state"):
         grid_seed_rows = st.session_state["report_grid_editor_state"] or grid_seed_rows
     if not grid_seed_rows:
-        fallback_row = _default_report_grid_row()
-        if legacy_tasks:
-            fallback_row["reported_complaints"] = legacy_tasks
-        if legacy_remarks:
-            fallback_row["details_remarks"] = legacy_remarks
-        if legacy_research:
-            fallback_row["product_details"] = legacy_research
-        if any(val not in (None, "") for val in fallback_row.values()):
-            grid_seed_rows = [fallback_row]
+        if template_key == "service":
+            fallback_row = _default_report_grid_row(template_key)
+            if legacy_tasks:
+                fallback_row["reported_complaints"] = legacy_tasks
+            if legacy_remarks:
+                fallback_row["details_remarks"] = legacy_remarks
+            if legacy_research:
+                fallback_row["product_details"] = legacy_research
+            if any(val not in (None, "") for val in fallback_row.values()):
+                grid_seed_rows = [fallback_row]
     existing_attachment_path = (
         resolve_upload_path(existing_attachment_value)
         if existing_attachment_value
@@ -15539,69 +15838,37 @@ def reports_page(conn):
                 f"Selected window: {format_period_range(to_iso_date(start_date), to_iso_date(end_date))}"
             )
 
-        st.caption(
-            "Log service progress in a spreadsheet-style grid. Add rows for each customer or job completed."
+        template_label = REPORT_TEMPLATE_LABELS.get(
+            template_key, template_key.replace("_", " ").title()
         )
-        seed_for_editor = grid_seed_rows or [_default_report_grid_row()]
-        editor_seed = _grid_rows_for_editor(seed_for_editor)
+        st.caption(
+            f"Log {template_label.lower()} progress in a spreadsheet-style grid. "
+            "Add rows for each customer or job completed."
+        )
+        seed_for_editor = grid_seed_rows or [_default_report_grid_row(template_key)]
+        editor_seed = _grid_rows_for_editor(
+            seed_for_editor, template_key=template_key
+        )
         if not editor_seed:
-            editor_seed = _grid_rows_for_editor([_default_report_grid_row()])
-        grid_df_seed = pd.DataFrame(editor_seed, columns=REPORT_GRID_FIELDS.keys())
-        column_config = {
-            "customer_name": st.column_config.TextColumn(
-                REPORT_GRID_FIELDS["customer_name"]["label"],
-                help="Who received the service work.",
-            ),
-            "reported_complaints": st.column_config.TextColumn(
-                REPORT_GRID_FIELDS["reported_complaints"]["label"],
-                help="Issues raised by the customer.",
-            ),
-            "product_details": st.column_config.TextColumn(
-                REPORT_GRID_FIELDS["product_details"]["label"],
-                help="Model, serial, or generator description.",
-            ),
-            "details_remarks": st.column_config.TextColumn(
-                REPORT_GRID_FIELDS["details_remarks"]["label"],
-                help="Technician notes or actions taken.",
-            ),
-            "status": st.column_config.TextColumn(
-                REPORT_GRID_FIELDS["status"]["label"],
-                help="Current job status (e.g. Completed, Pending).",
-            ),
-            "quotation_tk": st.column_config.NumberColumn(
-                REPORT_GRID_FIELDS["quotation_tk"]["label"],
-                help="Quoted amount in Taka.",
-                format="%.2f",
-                step=100.0,
-            ),
-            "bill_tk": st.column_config.NumberColumn(
-                REPORT_GRID_FIELDS["bill_tk"]["label"],
-                help="Billed amount in Taka.",
-                format="%.2f",
-                step=100.0,
-            ),
-            "work_done_date": st.column_config.DateColumn(
-                REPORT_GRID_FIELDS["work_done_date"]["label"],
-                help="When the work was completed.",
-                format="DD-MM-YYYY",
-            ),
-            "donation_cost": st.column_config.NumberColumn(
-                REPORT_GRID_FIELDS["donation_cost"]["label"],
-                help="Any donation or complimentary cost.",
-                format="%.2f",
-                step=100.0,
-            ),
-        }
+            editor_seed = _grid_rows_for_editor(
+                [_default_report_grid_row(template_key)],
+                template_key=template_key,
+            )
+        fields = _get_report_grid_fields(template_key)
+        grid_df_seed = pd.DataFrame(editor_seed, columns=fields.keys())
+        column_config = _build_report_column_config(fields)
         report_grid_df = st.data_editor(
             grid_df_seed,
             column_config=column_config,
-            column_order=list(REPORT_GRID_FIELDS.keys()),
+            column_order=list(fields.keys()),
             hide_index=True,
             num_rows="dynamic",
             use_container_width=True,
             key="report_grid_editor",
         )
-        st.session_state["report_grid_editor_state"] = _grid_rows_from_editor(report_grid_df)
+        st.session_state["report_grid_editor_state"] = _grid_rows_from_editor(
+            report_grid_df, template_key=template_key
+        )
         remove_attachment = False
         attachment_upload = None
         if existing_attachment_value:
@@ -15632,16 +15899,21 @@ def reports_page(conn):
 
     if submitted:
         cleanup_path: Optional[str] = None
-        grid_rows_to_store = _grid_rows_from_editor(report_grid_df)
+        grid_rows_to_store = _grid_rows_from_editor(
+            report_grid_df, template_key=template_key
+        )
         st.session_state.pop("report_grid_editor_state", None)
+        summary_fields = REPORT_TEMPLATE_SUMMARY_FIELDS.get(
+            template_key, REPORT_TEMPLATE_SUMMARY_FIELDS["service"]
+        )
         tasks_summary = _summarize_grid_column(
-            grid_rows_to_store, "reported_complaints"
+            grid_rows_to_store, summary_fields["tasks"]
         )
         remarks_summary = _summarize_grid_column(
-            grid_rows_to_store, "details_remarks"
+            grid_rows_to_store, summary_fields["remarks"]
         )
         research_summary = _summarize_grid_column(
-            grid_rows_to_store, "product_details"
+            grid_rows_to_store, summary_fields["research"]
         )
         try:
             normalized_key, normalized_start, normalized_end = normalize_report_window(
@@ -15713,6 +15985,7 @@ def reports_page(conn):
                             tasks=tasks_summary,
                             remarks=remarks_summary,
                             research=research_summary,
+                            report_template=template_key,
                             grid_rows=grid_rows_to_store,
                             attachment_path=attachment_to_store,
                             current_attachment=existing_attachment_value,
@@ -15823,7 +16096,7 @@ def reports_page(conn):
         dedent(
             f"""
             SELECT wr.report_id, wr.user_id, wr.period_type, wr.period_start, wr.period_end,
-                   wr.tasks, wr.remarks, wr.research, wr.grid_payload, wr.attachment_path, wr.created_at, wr.updated_at,
+                   wr.tasks, wr.remarks, wr.research, wr.grid_payload, wr.attachment_path, wr.report_template, wr.created_at, wr.updated_at,
                    u.username
             FROM work_reports wr
             JOIN users u ON u.user_id = wr.user_id
@@ -15844,8 +16117,13 @@ def reports_page(conn):
         axis=1,
     )
 
+    history_df["template_key"] = history_df["report_template"].apply(
+        _normalize_report_template
+    )
     history_df["grid_rows"] = history_df.apply(
-        lambda row: parse_report_grid_payload(row.get("grid_payload")),
+        lambda row: parse_report_grid_payload(
+            row.get("grid_payload"), template_key=row.get("template_key")
+        ),
         axis=1,
     )
 
@@ -15876,16 +16154,23 @@ def reports_page(conn):
         period_label = format_period_range(
             record.get("period_start"), record.get("period_end")
         )
+        template_key = record.get("template_key")
+        template_label = REPORT_TEMPLATE_LABELS.get(
+            template_key, str(template_key).replace("_", " ").title()
+        )
         grid_rows = record.get("grid_rows") or []
         display_df = format_report_grid_rows_for_display(
-            grid_rows, empty_ok=True
+            grid_rows, empty_ok=True, template_key=template_key
         )
         if display_df.empty:
             continue
         for entry in display_df.to_dict("records"):
-            entry_records.append(entry)
+            entry_record = {"Template": template_label}
+            entry_record.update(entry)
+            entry_records.append(entry_record)
             download_entry = {
                 "Team member": owner,
+                "Template": template_label,
                 "Cadence": cadence_label,
                 "Period": period_label,
             }
@@ -15894,17 +16179,22 @@ def reports_page(conn):
 
     entry_table = pd.DataFrame(entry_records)
     if not entry_table.empty:
-        for key, config in REPORT_GRID_FIELDS.items():
-            label = config["label"]
-            if label not in entry_table.columns:
-                entry_table[label] = pd.NA
-            if config["type"] == "number":
-                entry_table[label] = pd.to_numeric(
-                    entry_table[label], errors="coerce"
-                )
-            else:
-                entry_table[label] = entry_table[label].fillna("")
-        entry_table = entry_table.reindex(columns=REPORT_GRID_DISPLAY_COLUMNS)
+        for fields in REPORT_TEMPLATE_FIELDS.values():
+            for key, config in fields.items():
+                label = config["label"]
+                if label not in entry_table.columns:
+                    entry_table[label] = pd.NA
+                if config["type"] == "number":
+                    entry_table[label] = pd.to_numeric(
+                        entry_table[label], errors="coerce"
+                    )
+                else:
+                    entry_table[label] = entry_table[label].fillna("")
+        if "Template" not in entry_table.columns:
+            entry_table["Template"] = ""
+        entry_table = entry_table.reindex(
+            columns=["Template", *ALL_REPORT_DISPLAY_COLUMNS]
+        )
         st.dataframe(entry_table, use_container_width=True)
     else:
         st.info(
@@ -15915,14 +16205,15 @@ def reports_page(conn):
     if not download_df.empty:
         desired_columns = [
             "Team member",
+            "Template",
             "Cadence",
             "Period",
-            *REPORT_GRID_DISPLAY_COLUMNS,
+            *ALL_REPORT_DISPLAY_COLUMNS,
         ]
         download_df = download_df.reindex(columns=desired_columns, fill_value="")
     elif not entry_table.empty:
         download_df = entry_table.reindex(
-            columns=REPORT_GRID_DISPLAY_COLUMNS, fill_value=""
+            columns=["Template", *ALL_REPORT_DISPLAY_COLUMNS], fill_value=""
         )
     if not download_df.empty:
         csv_data = download_df.to_csv(index=False).encode("utf-8")
@@ -15976,7 +16267,9 @@ def reports_page(conn):
             )
             with st.expander(header, expanded=False):
                 grid_df = format_report_grid_rows_for_display(
-                    row.get("grid_rows"), empty_ok=True
+                    row.get("grid_rows"),
+                    empty_ok=True,
+                    template_key=row.get("template_key"),
                 )
                 if not grid_df.empty:
                     st.dataframe(grid_df, use_container_width=True)
