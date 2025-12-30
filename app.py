@@ -389,15 +389,21 @@ def _load_report_grid_dataframe(file_bytes: bytes, filename: str) -> Optional[pd
     if df is None or df.empty:
         return df
     cleaned_columns: list[str] = []
-    for col in df.columns:
+    seen_headers: dict[str, int] = {}
+    for idx, col in enumerate(df.columns, start=1):
         if pd.isna(col):
-            cleaned_columns.append("")
+            cleaned = ""
         else:
-            cleaned_columns.append(str(col).strip())
+            cleaned = str(col).strip()
+        if not cleaned or cleaned.lower().startswith("unnamed"):
+            cleaned = f"Column {idx}"
+        base_header = cleaned
+        seen_count = seen_headers.get(base_header, 0)
+        if seen_count:
+            cleaned = f"{base_header} ({seen_count + 1})"
+        seen_headers[base_header] = seen_count + 1
+        cleaned_columns.append(cleaned)
     df.columns = cleaned_columns
-    unnamed_mask = df.columns.to_series().str.lower().str.startswith("unnamed")
-    df = df.loc[:, ~unnamed_mask]
-    df = df.loc[:, df.columns != ""]
     return df
 
 
@@ -12999,6 +13005,7 @@ def delivery_orders_page(
     if show_heading:
         st.subheader("🚚 Delivery orders")
 
+    is_admin = current_user_is_admin()
     record_label_input = clean_text(record_type_label)
     record_label = record_label_input or "Delivery order"
     record_label_lower = record_label.lower()
@@ -16120,17 +16127,8 @@ def reports_page(conn):
         user_ids = [viewer_id]
         label_map[viewer_id] = clean_text(user.get("username")) or f"User #{viewer_id}"
 
-    if is_admin:
-        default_index = user_ids.index(viewer_id) if viewer_id in user_ids else 0
-        report_owner_id = st.selectbox(
-            "Report owner",
-            user_ids,
-            index=default_index,
-            format_func=lambda uid: label_map.get(uid, f"User #{uid}"),
-            key="report_owner_select",
-        )
-    else:
-        report_owner_id = viewer_id
+    report_owner_id = viewer_id
+    if not is_admin:
         st.info(
             f"Recording progress for **{label_map.get(viewer_id, 'you')}**.",
             icon="📝",
@@ -16238,11 +16236,7 @@ def reports_page(conn):
             int(val) for val in selectable_reports["report_id"].tolist() if not pd.isna(val)
         ]
 
-    report_choices = [None] + selectable_ids
-
     def _format_report_choice(value):
-        if value is None:
-            return "➕ Create new report"
         try:
             return record_labels.get(int(value), f"Report #{int(value)}")
         except Exception:
@@ -16258,17 +16252,21 @@ def reports_page(conn):
 
     current_selection = st.session_state.get("report_edit_select")
     try:
-        if current_selection is not None and int(current_selection) not in report_choices:
+        if current_selection is not None and int(current_selection) not in selectable_ids:
             st.session_state["report_edit_select"] = None
     except Exception:
         st.session_state["report_edit_select"] = None
 
-    selected_report_id = st.selectbox(
-        "Load an existing report",
-        report_choices,
-        format_func=_format_report_choice,
-        key="report_edit_select",
-    )
+    selected_report_id = None
+    if selectable_ids:
+        selected_report_id = st.selectbox(
+            "Load an existing report",
+            selectable_ids,
+            format_func=_format_report_choice,
+            key="report_edit_select",
+            index=None,
+            placeholder="Select a report to edit",
+        )
 
     # Preserve spreadsheet-style edits while working on the same report, but
     # reset when switching to another record.
