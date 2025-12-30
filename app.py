@@ -428,6 +428,7 @@ NOTIFICATION_EVENT_LABELS = {
     "work_done_updated": "Work done updated",
 }
 
+LEAD_REMARK_TAG = "Lead / Chasing"
 
 def customer_complete_clause(alias: str = "") -> str:
     prefix = f"{alias}." if alias else ""
@@ -442,6 +443,39 @@ def customer_complete_clause(alias: str = "") -> str:
 
 def customer_incomplete_clause(alias: str = "") -> str:
     return f"NOT ({customer_complete_clause(alias)})"
+
+
+def _is_blank_field(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not clean_text(value)
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def _has_quotation_items(items: Optional[list[dict[str, object]]]) -> bool:
+    if not items:
+        return False
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        if clean_text(entry.get("description")):
+            return True
+        quantity = _coerce_float(entry.get("quantity"), 0.0)
+        rate = _coerce_float(entry.get("rate"), 0.0)
+        total_price = _coerce_float(entry.get("total_price"), 0.0)
+        if quantity > 0 or rate > 0 or total_price > 0:
+            return True
+    return False
+
+
+def _is_lead_customer(remarks: Optional[str]) -> bool:
+    if not remarks:
+        return False
+    normalized = clean_text(remarks).lower()
+    return "lead / chasing" in normalized or "lead: chasing" in normalized
 
 # ---------- Schema ----------
 ADMIN_DEFAULT_PASSWORD = "PANNAPS123"
@@ -8047,8 +8081,48 @@ def customers_page(conn):
     """,
         tuple(params),
     )
+    lead_mask = df_raw.get("remarks", pd.Series(dtype=object)).apply(_is_lead_customer)
+    lead_df = df_raw[lead_mask].copy()
+    df_raw = df_raw[~lead_mask].copy()
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
+    if not lead_df.empty:
+        st.markdown("### Leads (Chasing)")
+        lead_view = lead_df.copy()
+        lead_view["created_at"] = pd.to_datetime(
+            lead_view["created_at"], errors="coerce"
+        )
+        lead_columns = [
+            col
+            for col in [
+                "id",
+                "name",
+                "company_name",
+                "phone",
+                "address",
+                "remarks",
+                "created_at",
+                "uploaded_by",
+            ]
+            if col in lead_view.columns
+        ]
+        lead_view = lead_view[lead_columns]
+        st.dataframe(
+            lead_view,
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.Column("ID"),
+                "name": st.column_config.TextColumn("Name"),
+                "company_name": st.column_config.TextColumn("Company"),
+                "phone": st.column_config.TextColumn("Phone"),
+                "address": st.column_config.TextColumn("Address"),
+                "remarks": st.column_config.TextColumn("Lead status"),
+                "created_at": st.column_config.DatetimeColumn(
+                    "Created", format="DD-MM-YYYY HH:mm"
+                ),
+                "uploaded_by": st.column_config.Column("Uploaded by"),
+            },
+        )
     st.markdown("### Quick edit or delete")
     if df_raw.empty:
         st.info("No customers found for the current filters.")
@@ -10284,6 +10358,7 @@ def _upsert_customer_from_manual_quotation(
     district: Optional[str],
     reference: Optional[str] = None,
     created_by: Optional[int] = None,
+    lead_status: Optional[str] = None,
 ) -> Optional[int]:
     """Insert or backfill a customer captured from a manual quotation entry."""
 
@@ -10372,6 +10447,9 @@ def _upsert_customer_from_manual_quotation(
         return customer_id
 
     remark_parts = []
+    lead_tag = clean_text(lead_status)
+    if lead_tag:
+        remark_parts.append(lead_tag)
     if district_label:
         remark_parts.append(f"District: {district_label}")
     if reference_label:
@@ -10604,11 +10682,18 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 st.session_state["quotation_document_path"] = str(saved_prefill)
         updates = _extract_quotation_metadata(text)
         detected_items = updates.pop("_detected_items", None)
+        applied_updates = False
         if updates:
-            st.session_state.update(updates)
-        if detected_items:
+            for key, value in updates.items():
+                if _is_blank_field(st.session_state.get(key)):
+                    st.session_state[key] = value
+                    applied_updates = True
+        if detected_items and not _has_quotation_items(
+            st.session_state.get("quotation_item_rows")
+        ):
             st.session_state["quotation_item_rows"] = detected_items
-        if updates or detected_items:
+            applied_updates = True
+        if applied_updates:
             st.success("Quotation fields auto-filled from the uploaded file.")
 
     with st.form("quotation_form"):
@@ -10965,6 +11050,18 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
             "created_by": current_user_id(),
         }
         record_id = _save_quotation_record(conn, payload)
+        if clean_text(customer_company):
+            _upsert_customer_from_manual_quotation(
+                conn,
+                name=customer_contact_name,
+                company=customer_company,
+                phone=customer_contact,
+                address=customer_address,
+                district=customer_district,
+                reference=reference_value,
+                created_by=current_user_id(),
+                lead_status=LEAD_REMARK_TAG,
+            )
 
         st.session_state[result_key] = {
             "display": display_df,
