@@ -609,13 +609,17 @@ NOTIFICATION_EVENT_LABELS = {
     "maintenance_updated": "Maintenance updated",
     "quotation_created": "Quotation created",
     "quotation_updated": "Quotation updated",
+    "quotation_deleted": "Quotation deleted",
     "warranty_updated": "Warranty updated",
     "report_submitted": "Report submitted",
     "report_updated": "Report updated",
+    "report_deleted": "Report deleted",
     "delivery_order_created": "Delivery order saved",
     "delivery_order_updated": "Delivery order updated",
+    "delivery_order_deleted": "Delivery order deleted",
     "work_done_created": "Work done saved",
     "work_done_updated": "Work done updated",
+    "work_done_deleted": "Work done deleted",
 }
 
 LEAD_REMARK_TAG = "Lead / Chasing"
@@ -836,6 +840,8 @@ CREATE TABLE IF NOT EXISTS delivery_orders (
     payment_receipt_path TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL,
     FOREIGN KEY(order_id) REFERENCES orders(order_id) ON DELETE SET NULL
 );
@@ -940,6 +946,7 @@ CREATE TABLE IF NOT EXISTS work_reports (
     research TEXT,
     grid_payload TEXT,
     attachment_path TEXT,
+    import_file_path TEXT,
     report_template TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -982,6 +989,8 @@ CREATE TABLE IF NOT EXISTS quotations (
     created_by INTEGER,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(created_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_quotations_status ON quotations(status);
@@ -1113,16 +1122,21 @@ def ensure_schema_upgrades(conn):
     add_column("delivery_orders", "status", "TEXT DEFAULT 'pending'")
     add_column("delivery_orders", "payment_receipt_path", "TEXT")
     add_column("delivery_orders", "updated_at", "TEXT DEFAULT (datetime('now'))")
+    add_column("delivery_orders", "deleted_at", "TEXT")
+    add_column("delivery_orders", "deleted_by", "INTEGER")
     add_column("import_history", "amount_spent", "REAL")
     add_column("import_history", "imported_by", "INTEGER")
     add_column("import_history", "delivery_address", "TEXT")
     add_column("import_history", "quantity", "INTEGER DEFAULT 1")
     add_column("work_reports", "grid_payload", "TEXT")
     add_column("work_reports", "attachment_path", "TEXT")
+    add_column("work_reports", "import_file_path", "TEXT")
     add_column("work_reports", "report_template", "TEXT")
     add_column("service_documents", "uploaded_by", "INTEGER")
     add_column("maintenance_documents", "uploaded_by", "INTEGER")
     add_column("quotations", "salesperson_email", "TEXT")
+    add_column("quotations", "deleted_at", "TEXT")
+    add_column("quotations", "deleted_by", "INTEGER")
 
     # Remove stored email data for privacy; the app no longer collects it.
     if has_column("customers", "email"):
@@ -1991,6 +2005,7 @@ def _build_staff_alerts(conn, *, user_id: Optional[int]) -> list[dict[str, objec
             FROM quotations
             WHERE created_by = ?
               AND follow_up_date IS NOT NULL
+              AND deleted_at IS NULL
               AND LOWER(IFNULL(status, 'pending')) <> 'paid'
             ORDER BY date(follow_up_date) ASC
             LIMIT 12
@@ -2386,7 +2401,7 @@ def _fetch_quotation_for_editor(conn, quotation_id: int) -> Optional[dict[str, o
                    discount_pct, document_path, letter_template, salesperson_name,
                    salesperson_title, salesperson_contact, quote_type
               FROM quotations
-             WHERE quotation_id=?
+             WHERE quotation_id=? AND deleted_at IS NULL
             """
         ),
         (quotation_id,),
@@ -2449,7 +2464,7 @@ def _apply_editor_payload(conn, quotation_id: int, payload: Mapping[str, object]
 
     values.append(quotation_id)
     cursor = conn.execute(
-        f"UPDATE quotations SET {', '.join(set_parts)}, updated_at=datetime('now') WHERE quotation_id=?",
+        f"UPDATE quotations SET {', '.join(set_parts)}, updated_at=datetime('now') WHERE quotation_id=? AND deleted_at IS NULL",
         tuple(values),
     )
     conn.commit()
@@ -3000,7 +3015,7 @@ def link_delivery_order_to_customer(
         return
     cur = conn.cursor()
     row = cur.execute(
-        "SELECT customer_id FROM delivery_orders WHERE do_number = ?",
+        "SELECT customer_id FROM delivery_orders WHERE do_number = ? AND deleted_at IS NULL",
         (do_serial,),
     ).fetchone()
     if row is None:
@@ -3395,6 +3410,43 @@ def store_report_attachment(uploaded_file, *, identifier: Optional[str] = None) 
         return str(dest)
 
 
+def store_report_import_file(
+    filename: str,
+    payload: bytes,
+    *,
+    identifier: Optional[str] = None,
+) -> Optional[str]:
+    """Persist a report import spreadsheet for later download."""
+
+    if not payload:
+        return None
+
+    ensure_upload_dirs()
+    raw_name = filename or "report_import"
+    allowed_exts = {".xlsx", ".xls", ".csv"}
+    suffix = Path(raw_name).suffix.lower()
+    if suffix not in allowed_exts:
+        suffix = ".xlsx"
+    stem = Path(raw_name).stem
+    safe_stem = "".join(ch for ch in stem if ch.isalnum() or ch in ("_", "-")) or "report_import"
+    safe_stem = safe_stem.strip("_") or "report_import"
+    if identifier:
+        ident = "".join(ch for ch in identifier if ch.isalnum() or ch in ("_", "-"))
+        if ident:
+            safe_stem = f"{ident}_{safe_stem}"
+    dest = REPORT_DOCS_DIR / f"{safe_stem}{suffix}"
+    counter = 1
+    while dest.exists():
+        dest = REPORT_DOCS_DIR / f"{safe_stem}_{counter}{suffix}"
+        counter += 1
+    with open(dest, "wb") as fh:
+        fh.write(payload)
+    try:
+        return str(dest.relative_to(BASE_DIR))
+    except ValueError:
+        return str(dest)
+
+
 def resolve_upload_path(path_str: Optional[str]) -> Optional[Path]:
     if not path_str:
         return None
@@ -3589,6 +3641,28 @@ def bundle_documents_zip(documents):
         return None
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for doc in documents:
+            path = doc.get("path")
+            archive_name = doc.get("archive_name")
+            if not path or not archive_name:
+                continue
+            if not path.exists():
+                continue
+            zf.write(path, archive_name)
+    buffer.seek(0)
+    return buffer
+
+
+def bundle_customer_package(
+    documents: list[dict[str, object]],
+    summary_pdf: bytes,
+    summary_name: str,
+) -> io.BytesIO:
+    buffer = io.BytesIO()
+    safe_name = _sanitize_path_component(summary_name) or "customer"
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        if summary_pdf:
+            zf.writestr(f"{safe_name}_summary.pdf", summary_pdf)
         for doc in documents:
             path = doc.get("path")
             archive_name = doc.get("archive_name")
@@ -3991,6 +4065,7 @@ def _build_delivery_orders_export(conn) -> pd.DataFrame:
         FROM delivery_orders d
         LEFT JOIN customers c ON c.customer_id = d.customer_id
         WHERE COALESCE(d.record_type, 'delivery_order') = 'delivery_order'
+          AND d.deleted_at IS NULL
         ORDER BY datetime(d.created_at) DESC, d.do_number DESC
         """
     )
@@ -6102,6 +6177,7 @@ def dashboard(conn):
                                research,
                                grid_payload,
                                attachment_path,
+                               import_file_path,
                                report_template,
                                period_start,
                                period_end,
@@ -6224,6 +6300,31 @@ def dashboard(conn):
                     st.caption(
                         f"Submitted {submitted_label} • Last updated {updated_label}"
                     )
+                    import_file_value = clean_text(record.get("import_file_path"))
+                    if import_file_value:
+                        import_path = resolve_upload_path(import_file_value)
+                        import_bytes = None
+                        if import_path and import_path.exists():
+                            try:
+                                import_bytes = import_path.read_bytes()
+                            except OSError:
+                                import_bytes = None
+                        if import_bytes:
+                            st.download_button(
+                                "Download imported file",
+                                data=import_bytes,
+                                file_name=(
+                                    import_path.name if import_path else "imported_report"
+                                ),
+                                key=f"dashboard_report_import_{record.get('report_id')}",
+                            )
+                        else:
+                            st.warning(
+                                "The imported file could not be found on disk.",
+                                icon="⚠️",
+                            )
+                    else:
+                        st.caption("No import file saved for this report.")
                     attachment_value = clean_text(record.get("attachment_path"))
                     if attachment_value:
                         attachment_path = resolve_upload_path(attachment_value)
@@ -6316,6 +6417,7 @@ def dashboard(conn):
             f"""
             SELECT wr.report_id,
                    wr.attachment_path,
+                   wr.import_file_path,
                    wr.period_start,
                    wr.period_end,
                    wr.report_template,
@@ -6347,25 +6449,115 @@ def dashboard(conn):
             lambda value: format_time_ago(value) or format_period_range(value, value)
         )
         for _, row in uploads_df.iterrows():
+            file_entries = []
             attachment_value = clean_text(row.get("attachment_path"))
-            if not attachment_value:
+            if attachment_value:
+                file_entries.append(("Attachment", attachment_value))
+            import_value = clean_text(row.get("import_file_path"))
+            if import_value:
+                file_entries.append(("Import", import_value))
+            if not file_entries:
                 continue
-            path = resolve_upload_path(attachment_value)
-            if not path or not path.exists():
-                continue
-            try:
-                payload = path.read_bytes()
-            except OSError:
-                continue
-            label = (
+            label_prefix = (
                 f"{row.get('owner')} • {row.get('Template')} • {row.get('Period')}"
             )
-            st.download_button(
-                label,
-                data=payload,
-                file_name=path.name,
-                key=f"recent_attachment_{row.get('report_id')}",
+            for idx, (kind, file_value) in enumerate(file_entries, start=1):
+                path = resolve_upload_path(file_value)
+                if not path or not path.exists():
+                    continue
+                try:
+                    payload = path.read_bytes()
+                except OSError:
+                    continue
+                label = f"{label_prefix} • {kind}"
+                st.download_button(
+                    label,
+                    data=payload,
+                    file_name=path.name,
+                    key=f"recent_attachment_{row.get('report_id')}_{idx}",
+                )
+
+    if is_admin:
+        recent_template_reports = df_query(
+            conn,
+            dedent(
+                """
+                SELECT wr.report_id,
+                       wr.period_start,
+                       wr.period_end,
+                       wr.report_template,
+                       wr.grid_payload,
+                       wr.attachment_path,
+                       wr.import_file_path,
+                       wr.created_at,
+                       COALESCE(u.username, 'User #' || wr.user_id) AS owner
+                FROM work_reports wr
+                LEFT JOIN users u ON u.user_id = wr.user_id
+                WHERE LOWER(COALESCE(wr.report_template, '')) IN ('service', 'follow_up')
+                ORDER BY datetime(wr.created_at) DESC, wr.report_id DESC
+                LIMIT 6
+                """
+            ),
+        )
+        if not recent_template_reports.empty:
+            st.markdown("#### Service & follow-up report snapshots")
+            recent_template_reports["Template"] = recent_template_reports[
+                "report_template"
+            ].apply(
+                lambda value: REPORT_TEMPLATE_LABELS.get(
+                    _normalize_report_template(value), "Service report"
+                )
             )
+            recent_template_reports["Period"] = recent_template_reports.apply(
+                lambda row: format_period_range(
+                    row.get("period_start"), row.get("period_end")
+                ),
+                axis=1,
+            )
+            for _, row in recent_template_reports.iterrows():
+                header = (
+                    f"{row.get('owner')} • {row.get('Template')} • {row.get('Period')}"
+                )
+                with st.expander(header, expanded=False):
+                    template_key = _normalize_report_template(row.get("report_template"))
+                    grid_rows = parse_report_grid_payload(
+                        row.get("grid_payload"), template_key=template_key
+                    )
+                    grid_df = format_report_grid_rows_for_display(
+                        grid_rows, empty_ok=True, template_key=template_key
+                    )
+                    if grid_df.empty:
+                        st.caption("No structured entries were captured for this report.")
+                    else:
+                        st.dataframe(grid_df, use_container_width=True, hide_index=True)
+                        csv_payload = grid_df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "Download report entries (CSV)",
+                            data=csv_payload,
+                            file_name="report_entries.csv",
+                            key=f"dashboard_report_csv_{row.get('report_id')}",
+                        )
+                    file_options = [
+                        ("Import file", row.get("import_file_path")),
+                        ("Attachment", row.get("attachment_path")),
+                    ]
+                    for label, path_value in file_options:
+                        clean_path = clean_text(path_value)
+                        if not clean_path:
+                            continue
+                        resolved = resolve_upload_path(clean_path)
+                        if not resolved or not resolved.exists():
+                            continue
+                        try:
+                            file_bytes = resolved.read_bytes()
+                        except OSError:
+                            continue
+                        st.download_button(
+                            f"Download {label.lower()}",
+                            data=file_bytes,
+                            file_name=resolved.name,
+                            key=f"dashboard_report_file_{row.get('report_id')}_{label}",
+                        )
 
     if is_admin:
         _render_admin_record_history(conn)
@@ -6385,6 +6577,7 @@ def dashboard(conn):
                        u.username
                 FROM quotations q
                 LEFT JOIN users u ON u.user_id = q.created_by
+                WHERE q.deleted_at IS NULL
                 ORDER BY datetime(q.quote_date) DESC, q.quotation_id DESC
                 LIMIT 8
                 """
@@ -6466,7 +6659,7 @@ def dashboard(conn):
                             if persisted_path:
                                 try:
                                     conn.execute(
-                                        "UPDATE quotations SET document_path=? WHERE quotation_id=?",
+                                        "UPDATE quotations SET document_path=? WHERE quotation_id=? AND deleted_at IS NULL",
                                         (persisted_path, quote_id),
                                     )
                                     conn.commit()
@@ -6523,6 +6716,7 @@ def dashboard(conn):
                 FROM quotations q
                 LEFT JOIN users u ON u.user_id = q.created_by
                 WHERE q.document_path IS NOT NULL AND q.document_path != ''
+                  AND q.deleted_at IS NULL
                 ORDER BY datetime(q.updated_at) DESC, datetime(q.quote_date) DESC, q.quotation_id DESC
                 LIMIT 12
                 """
@@ -7937,6 +8131,7 @@ def customers_page(conn):
                         SELECT customer_id, file_path, items_payload, total_amount, payment_receipt_path
                         FROM delivery_orders
                         WHERE do_number = ? AND COALESCE(record_type, 'delivery_order') = 'delivery_order'
+                          AND deleted_at IS NULL
                         """,
                         (do_serial,),
                     ).fetchone()
@@ -8083,7 +8278,7 @@ def customers_page(conn):
                                 )
                             existing_work_done = df_query(
                                 conn,
-                                "SELECT record_type, file_path, payment_receipt_path FROM delivery_orders WHERE do_number = ?",
+                                "SELECT record_type, file_path, payment_receipt_path FROM delivery_orders WHERE do_number = ? AND deleted_at IS NULL",
                                 (work_done_serial,),
                             )
                             existing_work_done_receipt = None
@@ -9192,6 +9387,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
         FROM delivery_orders d
         LEFT JOIN customers c ON c.customer_id = d.customer_id
         WHERE COALESCE(d.record_type, 'delivery_order') = 'delivery_order'
+          AND d.deleted_at IS NULL
         ORDER BY datetime(d.created_at) DESC
         """,
     )
@@ -10628,11 +10824,11 @@ def _render_letterhead_preview(
 
 def _quotation_scope_filter() -> tuple[str, tuple[object, ...]]:
     if current_user_is_admin():
-        return "", ()
+        return "WHERE deleted_at IS NULL", ()
     uid = current_user_id()
     if uid is None:
         return "WHERE 1=0", ()
-    return "WHERE created_by = ?", (uid,)
+    return "WHERE created_by = ? AND deleted_at IS NULL", (uid,)
 
 
 def _save_quotation_record(conn, payload: dict) -> Optional[int]:
@@ -10676,7 +10872,7 @@ def _save_quotation_record(conn, payload: dict) -> Optional[int]:
             tuple(values),
         )
         conn.execute(
-            "UPDATE quotations SET updated_at=datetime('now') WHERE quotation_id=?",
+            "UPDATE quotations SET updated_at=datetime('now') WHERE quotation_id=? AND deleted_at IS NULL",
             (cur.lastrowid,),
         )
         conn.commit()
@@ -10845,7 +11041,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
             SELECT status, follow_up_status, follow_up_notes, follow_up_date, reminder_label,
                    payment_receipt_path, reference, customer_name, customer_company, customer_contact
             FROM quotations
-            WHERE quotation_id=?
+            WHERE quotation_id=? AND deleted_at IS NULL
             """,
             (quotation_id,),
         )
@@ -10900,7 +11096,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
                 reminder_label=?,
                 payment_receipt_path=COALESCE(?, payment_receipt_path),
                 updated_at=datetime('now')
-            WHERE quotation_id=?
+            WHERE quotation_id=? AND deleted_at IS NULL
             """,
             (
                 status_value,
@@ -11468,6 +11664,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
 
 def _render_quotation_management(conn):
     st.markdown("### Quotation tracker")
+    is_admin = current_user_is_admin()
     scope_clause, scope_params = _quotation_scope_filter()
     quotes_df = df_query(
         conn,
@@ -11807,14 +12004,14 @@ def _render_quotation_management(conn):
 
         conn.execute(
             """
-            UPDATE quotations
+             UPDATE quotations
                SET follow_up_status=?,
                    follow_up_notes=?,
                    follow_up_date=?,
                    reminder_label=?,
                    payment_receipt_path=COALESCE(?, payment_receipt_path),
                    updated_at=datetime('now')
-             WHERE quotation_id=?
+             WHERE quotation_id=? AND deleted_at IS NULL
             """,
             (
                 clean_text(follow_up_status_input) or None,
@@ -11827,6 +12024,61 @@ def _render_quotation_management(conn):
         )
         conn.commit()
         st.success("Quotation details updated.")
+        _safe_rerun()
+
+    st.markdown("#### Delete quotation")
+    current_actor = current_user_id()
+    deletable_df = quotes_df.copy()
+    if not is_admin and current_actor is not None:
+        deletable_df = deletable_df[
+            deletable_df["created_by"].apply(lambda val: int(_coerce_float(val, -1)) == current_actor)
+        ]
+    if deletable_df.empty:
+        st.caption("No quotations available for deletion.")
+        return
+    delete_labels: dict[int, str] = {}
+    for _, row in deletable_df.iterrows():
+        try:
+            quote_id = int(row.get("quotation_id"))
+        except Exception:
+            continue
+        reference = clean_text(row.get("reference")) or f"Quotation #{quote_id}"
+        customer = clean_text(row.get("customer_company")) or clean_text(
+            row.get("customer_name")
+        ) or clean_text(row.get("customer_contact"))
+        delete_labels[quote_id] = " • ".join(part for part in [reference, customer] if part)
+    delete_options = list(delete_labels.keys())
+    selected_delete_id = st.selectbox(
+        "Select a quotation to delete",
+        delete_options,
+        format_func=lambda val: delete_labels.get(val, f"Quotation #{val}"),
+        key="quotation_delete_select",
+    )
+    confirm_delete = st.checkbox(
+        "I understand this will remove the quotation from active views.",
+        key="quotation_delete_confirm",
+    )
+    if st.button(
+        "Delete quotation",
+        type="secondary",
+        disabled=not confirm_delete,
+        key="quotation_delete_button",
+    ):
+        conn.execute(
+            "UPDATE quotations SET deleted_at=datetime('now'), deleted_by=? WHERE quotation_id=?",
+            (current_actor, selected_delete_id),
+        )
+        conn.commit()
+        description = f"Quotation {delete_labels.get(selected_delete_id, selected_delete_id)} deleted"
+        log_activity(
+            conn,
+            event_type="quotation_deleted",
+            description=description,
+            entity_type="quotation",
+            entity_id=int(selected_delete_id),
+            user_id=current_actor,
+        )
+        st.warning("Quotation deleted.")
         _safe_rerun()
 
 
@@ -11942,6 +12194,7 @@ def advanced_search_page(conn):
                        u.username
                 FROM quotations q
                 LEFT JOIN users u ON u.user_id = q.created_by
+                WHERE q.deleted_at IS NULL
                 ORDER BY datetime(q.quote_date) DESC, q.quotation_id DESC
                 LIMIT 200
                 """
@@ -12019,6 +12272,7 @@ def advanced_search_page(conn):
             SELECT do_number, description, sales_person, remarks, created_at, created_by, total_amount
             FROM delivery_orders
             WHERE COALESCE(record_type, 'delivery_order') = 'delivery_order'
+              AND deleted_at IS NULL
             ORDER BY datetime(created_at) DESC
             LIMIT 200
             """,
@@ -12063,25 +12317,89 @@ def advanced_search_page(conn):
 
     if not results:
         st.info("No records found for the selected filters.")
+    else:
+        results_df = pd.DataFrame(results)
+        if search_text:
+            needle = re.escape(search_text.lower())
+            results_df = results_df[results_df["_search"].str.contains(needle, regex=True, na=False)]
+
+        display_cols = ["Type", "Title", "Details", "Date", "Staff", "Amount", "Status", "Attachment"]
+        results_df = results_df.fillna("")
+        st.dataframe(results_df[display_cols], use_container_width=True, hide_index=True)
+
+        csv_bytes = results_df.drop(columns=["_search"], errors="ignore").to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download results",
+            data=csv_bytes,
+            file_name="advanced_search.csv",
+            mime="text/csv",
+            key="advanced_search_download",
+        )
+
+    st.markdown("### Staff activity history")
+    if not staff_choices:
+        st.caption("No staff accounts available for activity history.")
         return
-
-    results_df = pd.DataFrame(results)
-    if search_text:
-        needle = re.escape(search_text.lower())
-        results_df = results_df[results_df["_search"].str.contains(needle, regex=True, na=False)]
-
-    display_cols = ["Type", "Title", "Details", "Date", "Staff", "Amount", "Status", "Attachment"]
-    results_df = results_df.fillna("")
-    st.dataframe(results_df[display_cols], use_container_width=True, hide_index=True)
-
-    csv_bytes = results_df.drop(columns=["_search"], errors="ignore").to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download results",
-        data=csv_bytes,
-        file_name="advanced_search.csv",
-        mime="text/csv",
-        key="advanced_search_download",
+    history_staff = st.selectbox(
+        "Team member",
+        staff_choices,
+        format_func=lambda uid: staff_map.get(uid, f"User #{uid}"),
+        key="advanced_search_history_staff",
     )
+    history_range = st.date_input(
+        "History range",
+        value=date_window,
+        key="advanced_search_history_range",
+    )
+    history_start = history_end = None
+    if isinstance(history_range, (list, tuple)) and len(history_range) == 2:
+        history_start = to_iso_date(history_range[0])
+        history_end = to_iso_date(history_range[1])
+    elif history_range:
+        history_start = to_iso_date(history_range)
+        history_end = history_start
+    history_filters = ["a.user_id = ?"]
+    history_params: list[object] = [int(history_staff)]
+    if history_start:
+        history_filters.append("date(a.created_at) >= date(?)")
+        history_params.append(history_start)
+    if history_end:
+        history_filters.append("date(a.created_at) <= date(?)")
+        history_params.append(history_end)
+    history_clause = " AND ".join(history_filters)
+    history_df = df_query(
+        conn,
+        dedent(
+            f"""
+            SELECT a.created_at,
+                   a.event_type,
+                   a.entity_type,
+                   a.description
+            FROM activity_log a
+            WHERE {history_clause}
+            ORDER BY datetime(a.created_at) DESC, a.activity_id DESC
+            LIMIT 250
+            """
+        ),
+        tuple(history_params),
+    )
+    if history_df.empty:
+        st.caption("No activity history found for the selected staff member.")
+    else:
+        history_df = fmt_dates(history_df, ["created_at"])
+        history_df = history_df.rename(
+            columns={
+                "created_at": "When",
+                "event_type": "Activity",
+                "entity_type": "Type",
+                "description": "Details",
+            }
+        )
+        st.dataframe(
+            history_df[["When", "Activity", "Type", "Details"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def _render_maintenance_section(conn, *, show_heading: bool = True):
@@ -12097,6 +12415,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         FROM delivery_orders d
         LEFT JOIN customers c ON c.customer_id = d.customer_id
         WHERE COALESCE(d.record_type, 'delivery_order') = 'delivery_order'
+          AND d.deleted_at IS NULL
         ORDER BY datetime(d.created_at) DESC
         """,
     )
@@ -12719,6 +13038,7 @@ def delivery_orders_page(
             LEFT JOIN customers c ON c.customer_id = d.customer_id
             LEFT JOIN users u ON u.user_id = d.created_by
             WHERE COALESCE(d.record_type, 'delivery_order') = ?
+              AND d.deleted_at IS NULL
             ORDER BY datetime(d.created_at) DESC
             LIMIT 200
             """
@@ -12884,7 +13204,7 @@ def delivery_orders_page(
             cur = conn.cursor()
             conflicting_type = df_query(
                 conn,
-                "SELECT COALESCE(record_type, 'delivery_order') AS record_type FROM delivery_orders WHERE do_number = ? AND COALESCE(record_type, 'delivery_order') <> ?",
+                "SELECT COALESCE(record_type, 'delivery_order') AS record_type FROM delivery_orders WHERE do_number = ? AND COALESCE(record_type, 'delivery_order') <> ? AND deleted_at IS NULL",
                 (cleaned_number, record_type_key),
             )
             if not conflicting_type.empty:
@@ -12895,16 +13215,18 @@ def delivery_orders_page(
                 return
             existing = df_query(
                 conn,
-                "SELECT file_path, items_payload, total_amount, created_by, status, payment_receipt_path FROM delivery_orders WHERE do_number = ? AND COALESCE(record_type, 'delivery_order') = ?",
+                "SELECT file_path, items_payload, total_amount, created_by, status, payment_receipt_path, deleted_at FROM delivery_orders WHERE do_number = ? AND COALESCE(record_type, 'delivery_order') = ?",
                 (cleaned_number, record_type_key),
             )
             stored_path = None
             existing_status = "pending"
             existing_receipt = None
+            existing_deleted_at = None
             if not existing.empty:
                 stored_path = clean_text(existing.iloc[0].get("file_path"))
                 existing_status = clean_text(existing.iloc[0].get("status")) or "pending"
                 existing_receipt = clean_text(existing.iloc[0].get("payment_receipt_path"))
+                existing_deleted_at = clean_text(existing.iloc[0].get("deleted_at"))
             locked_record = existing_status.lower() in closed_statuses
             receipt_only_update = (
                 locked_record
@@ -12941,7 +13263,7 @@ def delivery_orders_page(
                     UPDATE delivery_orders
                        SET payment_receipt_path=COALESCE(?, payment_receipt_path),
                            updated_at=datetime('now')
-                     WHERE do_number=? AND COALESCE(record_type, 'delivery_order') = ?
+                     WHERE do_number=? AND COALESCE(record_type, 'delivery_order') = ? AND deleted_at IS NULL
                     """,
                     (
                         receipt_path,
@@ -12986,7 +13308,7 @@ def delivery_orders_page(
                 cur.execute(
                     """
                     UPDATE delivery_orders
-                       SET customer_id=?, description=?, sales_person=?, remarks=?, file_path=?, items_payload=?, total_amount=?, status=?, payment_receipt_path=COALESCE(?, payment_receipt_path), updated_at=datetime('now'), created_by=COALESCE(created_by, ?), record_type=?
+                       SET customer_id=?, description=?, sales_person=?, remarks=?, file_path=?, items_payload=?, total_amount=?, status=?, payment_receipt_path=COALESCE(?, payment_receipt_path), updated_at=datetime('now'), created_by=COALESCE(created_by, ?), record_type=?, deleted_at=NULL, deleted_by=NULL
                      WHERE do_number=? AND COALESCE(record_type, 'delivery_order') = ?
                     """,
                     (
@@ -13008,7 +13330,12 @@ def delivery_orders_page(
             if selected_customer:
                 link_delivery_order_to_customer(conn, cleaned_number, int(selected_customer))
             conn.commit()
-            action_label = "updated" if not existing.empty else "created"
+            if existing.empty:
+                action_label = "created"
+            elif existing_deleted_at:
+                action_label = "restored"
+            else:
+                action_label = "updated"
             customer_display = customer_labels.get(
                 int(selected_customer) if selected_customer else None, "(customer)"
             )
@@ -13079,10 +13406,11 @@ def delivery_orders_page(
                d.payment_receipt_path,
                d.updated_at,
                COALESCE(u.username, '(user)') AS created_by_name
-          FROM delivery_orders d
+         FROM delivery_orders d
           LEFT JOIN customers c ON c.customer_id = d.customer_id
           LEFT JOIN users u ON u.user_id = d.created_by
          WHERE COALESCE(d.record_type, 'delivery_order') = ?
+           AND d.deleted_at IS NULL
          ORDER BY datetime(d.created_at) DESC
         """,
         (record_type_key,),
@@ -13193,6 +13521,63 @@ def delivery_orders_page(
         st.caption(
             f"No matching {record_label_lower} records found for the applied filters."
         )
+
+    st.markdown(f"#### Delete {record_label.lower()}")
+    actor_id = current_user_id()
+    deletable_df = do_df.copy()
+    if not is_admin and actor_id is not None:
+        deletable_df = deletable_df[
+            deletable_df["created_by"].apply(lambda val: int(_coerce_float(val, -1)) == actor_id)
+        ]
+    if deletable_df.empty:
+        st.caption(f"No {record_label_lower} records available for deletion.")
+        return
+    delete_labels: dict[str, str] = {}
+    for _, row in deletable_df.iterrows():
+        number = clean_text(row.get("do_number"))
+        if not number:
+            continue
+        customer = clean_text(row.get("customer")) or "(customer)"
+        delete_labels[number] = f"{number} • {customer}"
+    delete_options = list(delete_labels.keys())
+    selected_delete = st.selectbox(
+        f"Select a {record_label_lower} to delete",
+        delete_options,
+        format_func=lambda val: delete_labels.get(val, val),
+        key=f"{record_label_lower}_delete_select",
+    )
+    confirm_delete = st.checkbox(
+        f"I understand this {record_label_lower} will be removed from active views.",
+        key=f"{record_label_lower}_delete_confirm",
+    )
+    if st.button(
+        f"Delete {record_label_lower}",
+        type="secondary",
+        disabled=not confirm_delete,
+        key=f"{record_label_lower}_delete_button",
+    ):
+        conn.execute(
+            """
+            UPDATE delivery_orders
+               SET deleted_at=datetime('now'),
+                   deleted_by=?
+             WHERE do_number=?
+               AND COALESCE(record_type, 'delivery_order') = ?
+            """,
+            (actor_id, selected_delete, record_type_key),
+        )
+        conn.commit()
+        description = f"{record_label} {selected_delete} deleted"
+        log_activity(
+            conn,
+            event_type=f"{record_type_key}_deleted",
+            description=description,
+            entity_type=record_type_key,
+            entity_id=None,
+            user_id=actor_id,
+        )
+        st.warning(f"{record_label} deleted.")
+        _safe_rerun()
 
 
 def quotation_page(conn, *, render_id: Optional[int] = None):
@@ -13321,6 +13706,8 @@ def customer_summary_page(conn):
                s.service_product_info,
                s.description,
                s.remarks,
+               s.bill_document_path,
+               s.payment_receipt_path,
                COALESCE(c.name, cdo.name, '(unknown)') AS customer,
                COUNT(sd.document_id) AS doc_count
         FROM services s
@@ -13354,6 +13741,7 @@ def customer_summary_page(conn):
                m.maintenance_product_info,
                m.description,
                m.remarks,
+               m.payment_receipt_path,
                COALESCE(c.name, cdo.name, '(unknown)') AS customer,
                COUNT(md.document_id) AS doc_count
         FROM maintenance_records m
@@ -13388,10 +13776,12 @@ def customer_summary_page(conn):
                d.sales_person,
                d.remarks,
                d.created_at,
-               d.file_path
+               d.file_path,
+               d.payment_receipt_path
         FROM delivery_orders d
         LEFT JOIN customers c ON c.customer_id = d.customer_id
         WHERE d.customer_id IN ({placeholders})
+          AND d.deleted_at IS NULL
         ORDER BY datetime(d.created_at) DESC
         """,
         ids,
@@ -13400,6 +13790,7 @@ def customer_summary_page(conn):
         do_df = fmt_dates(do_df, ["created_at"])
         do_df["do_number"] = do_df["do_number"].apply(clean_text)
         do_df["Document"] = do_df["file_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
+        do_df["Receipt"] = do_df["payment_receipt_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
 
     do_numbers = set()
     if not do_df.empty and "do_number" in do_df.columns:
@@ -13424,20 +13815,25 @@ def customer_summary_page(conn):
                    d.sales_person,
                    d.remarks,
                    d.created_at,
-                   d.file_path
+                   d.file_path,
+                   d.payment_receipt_path
             FROM delivery_orders d
             LEFT JOIN customers c ON c.customer_id = d.customer_id
             WHERE d.do_number IN ({','.join('?' * len(missing_dos))})
+              AND d.deleted_at IS NULL
             """,
             missing_dos,
         )
         if not extra_df.empty:
             extra_df = fmt_dates(extra_df, ["created_at"])
             extra_df["do_number"] = extra_df["do_number"].apply(clean_text)
-            extra_df["Document"] = extra_df["file_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
             do_df = pd.concat([do_df, extra_df], ignore_index=True) if not do_df.empty else extra_df
             present_dos.update(val for val in extra_df["do_number"].tolist() if val)
     orphan_dos = sorted(do for do in do_numbers if do not in present_dos)
+
+    if do_df is not None and not do_df.empty:
+        do_df["Document"] = do_df["file_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
+        do_df["Receipt"] = do_df["payment_receipt_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
 
     st.markdown("**Delivery orders**")
     if (do_df is None or do_df.empty) and not orphan_dos:
@@ -13454,8 +13850,9 @@ def customer_summary_page(conn):
                         "remarks": "Remarks",
                         "created_at": "Created",
                         "Document": "Document",
+                        "Receipt": "Receipt",
                     }
-                ).drop(columns=["file_path"], errors="ignore"),
+                ).drop(columns=["file_path", "payment_receipt_path"], errors="ignore"),
                 use_container_width=True,
             )
         if orphan_dos:
@@ -13486,7 +13883,10 @@ def customer_summary_page(conn):
             }
         )
         st.dataframe(
-            service_display.drop(columns=["service_id"], errors="ignore"),
+            service_display.drop(
+                columns=["service_id", "bill_document_path", "payment_receipt_path"],
+                errors="ignore",
+            ),
             use_container_width=True,
         )
 
@@ -13509,11 +13909,48 @@ def customer_summary_page(conn):
             }
         )
         st.dataframe(
-            maintenance_display.drop(columns=["maintenance_id"], errors="ignore"),
+            maintenance_display.drop(
+                columns=["maintenance_id", "payment_receipt_path"],
+                errors="ignore",
+            ),
             use_container_width=True,
         )
 
     documents = []
+    customer_attachments = df_query(
+        conn,
+        f"""
+        SELECT customer_id, attachment_path
+        FROM customers
+        WHERE customer_id IN ({placeholders})
+          AND attachment_path IS NOT NULL
+          AND attachment_path != ''
+        """,
+        ids,
+    )
+    if not customer_attachments.empty:
+        for _, row in customer_attachments.iterrows():
+            path = resolve_upload_path(row.get("attachment_path"))
+            if not path or not path.exists():
+                continue
+            customer_id = int(row.get("customer_id"))
+            display_name = path.name
+            archive_name = "/".join(
+                [
+                    _sanitize_path_component("customer"),
+                    f"{_sanitize_path_component(str(customer_id))}_{_sanitize_path_component(display_name)}",
+                ]
+            )
+            documents.append(
+                {
+                    "source": "Customer",
+                    "reference": f"Customer #{customer_id}",
+                    "display": display_name,
+                    "path": path,
+                    "archive_name": archive_name,
+                    "key": f"customer_{customer_id}",
+                }
+            )
     if do_df is not None and not do_df.empty:
         for _, row in do_df.iterrows():
             path = resolve_upload_path(row.get("file_path"))
@@ -13537,6 +13974,25 @@ def customer_summary_page(conn):
                     "key": f"do_{do_ref}",
                 }
             )
+            receipt_path = resolve_upload_path(row.get("payment_receipt_path"))
+            if receipt_path and receipt_path.exists():
+                receipt_name = receipt_path.name
+                receipt_archive = "/".join(
+                    [
+                        _sanitize_path_component("delivery_order_receipts"),
+                        f"{_sanitize_path_component(do_ref)}_{_sanitize_path_component(receipt_name)}",
+                    ]
+                )
+                documents.append(
+                    {
+                        "source": "Delivery order receipt",
+                        "reference": do_ref,
+                        "display": receipt_name,
+                        "path": receipt_path,
+                        "archive_name": receipt_archive,
+                        "key": f"do_receipt_{do_ref}",
+                    }
+                )
 
     service_docs = pd.DataFrame()
     if "service_id" in service_df.columns and not service_df.empty:
@@ -13586,6 +14042,50 @@ def customer_summary_page(conn):
                     "key": f"service_{service_id}_{int(doc_row['document_id'])}",
                 }
             )
+    if not service_df.empty:
+        for _, row in service_df.iterrows():
+            if pd.isna(row.get("service_id")):
+                continue
+            service_id = int(row.get("service_id"))
+            reference = clean_text(row.get("do_number")) or f"Service #{service_id}"
+            bill_path = resolve_upload_path(row.get("bill_document_path"))
+            if bill_path and bill_path.exists():
+                bill_name = bill_path.name
+                bill_archive = "/".join(
+                    [
+                        _sanitize_path_component("service_bills"),
+                        f"{_sanitize_path_component(reference)}_{_sanitize_path_component(bill_name)}",
+                    ]
+                )
+                documents.append(
+                    {
+                        "source": "Service bill",
+                        "reference": reference,
+                        "display": bill_name,
+                        "path": bill_path,
+                        "archive_name": bill_archive,
+                        "key": f"service_bill_{service_id}",
+                    }
+                )
+            receipt_path = resolve_upload_path(row.get("payment_receipt_path"))
+            if receipt_path and receipt_path.exists():
+                receipt_name = receipt_path.name
+                receipt_archive = "/".join(
+                    [
+                        _sanitize_path_component("service_receipts"),
+                        f"{_sanitize_path_component(reference)}_{_sanitize_path_component(receipt_name)}",
+                    ]
+                )
+                documents.append(
+                    {
+                        "source": "Service receipt",
+                        "reference": reference,
+                        "display": receipt_name,
+                        "path": receipt_path,
+                        "archive_name": receipt_archive,
+                        "key": f"service_receipt_{service_id}",
+                    }
+                )
 
     maintenance_docs = pd.DataFrame()
     if "maintenance_id" in maintenance_df.columns and not maintenance_df.empty:
@@ -13635,6 +14135,110 @@ def customer_summary_page(conn):
                     "key": f"maintenance_{maintenance_id}_{int(doc_row['document_id'])}",
                 }
             )
+    if not maintenance_df.empty:
+        for _, row in maintenance_df.iterrows():
+            if pd.isna(row.get("maintenance_id")):
+                continue
+            maintenance_id = int(row.get("maintenance_id"))
+            reference = clean_text(row.get("do_number")) or f"Maintenance #{maintenance_id}"
+            receipt_path = resolve_upload_path(row.get("payment_receipt_path"))
+            if receipt_path and receipt_path.exists():
+                receipt_name = receipt_path.name
+                receipt_archive = "/".join(
+                    [
+                        _sanitize_path_component("maintenance_receipts"),
+                        f"{_sanitize_path_component(reference)}_{_sanitize_path_component(receipt_name)}",
+                    ]
+                )
+                documents.append(
+                    {
+                        "source": "Maintenance receipt",
+                        "reference": reference,
+                        "display": receipt_name,
+                        "path": receipt_path,
+                        "archive_name": receipt_archive,
+                        "key": f"maintenance_receipt_{maintenance_id}",
+                    }
+                )
+
+    customer_name = clean_text(info.get("name"))
+    raw_phone = clean_text(info.get("phone"))
+    phone_tokens = []
+    if raw_phone:
+        phone_tokens = [
+            token
+            for token in (clean_text(val) for val in re.split(r"[,\n]+", raw_phone))
+            if token
+        ]
+    quote_filters: list[str] = []
+    quote_params: list[object] = []
+    if customer_name:
+        quote_filters.append("LOWER(COALESCE(customer_name, '')) = LOWER(?)")
+        quote_filters.append("LOWER(COALESCE(customer_company, '')) = LOWER(?)")
+        quote_params.extend([customer_name, customer_name])
+    for phone in phone_tokens:
+        quote_filters.append("customer_contact LIKE ?")
+        quote_params.append(f"%{phone}%")
+    if quote_filters:
+        quote_clause = " OR ".join(quote_filters)
+        quotation_docs = df_query(
+            conn,
+            dedent(
+                f"""
+                SELECT quotation_id,
+                       reference,
+                       document_path,
+                       payment_receipt_path
+                FROM quotations
+                WHERE deleted_at IS NULL
+                  AND ({quote_clause})
+                ORDER BY datetime(quote_date) DESC, quotation_id DESC
+                """
+            ),
+            tuple(quote_params),
+        )
+        if not quotation_docs.empty:
+            for _, row in quotation_docs.iterrows():
+                quote_id = int(row.get("quotation_id"))
+                reference = clean_text(row.get("reference")) or f"Quotation #{quote_id}"
+                doc_path = resolve_upload_path(row.get("document_path"))
+                if doc_path and doc_path.exists():
+                    doc_name = doc_path.name
+                    doc_archive = "/".join(
+                        [
+                            _sanitize_path_component("quotations"),
+                            f"{_sanitize_path_component(reference)}_{_sanitize_path_component(doc_name)}",
+                        ]
+                    )
+                    documents.append(
+                        {
+                            "source": "Quotation",
+                            "reference": reference,
+                            "display": doc_name,
+                            "path": doc_path,
+                            "archive_name": doc_archive,
+                            "key": f"quotation_doc_{quote_id}",
+                        }
+                    )
+                receipt_path = resolve_upload_path(row.get("payment_receipt_path"))
+                if receipt_path and receipt_path.exists():
+                    receipt_name = receipt_path.name
+                    receipt_archive = "/".join(
+                        [
+                            _sanitize_path_component("quotation_receipts"),
+                            f"{_sanitize_path_component(reference)}_{_sanitize_path_component(receipt_name)}",
+                        ]
+                    )
+                    documents.append(
+                        {
+                            "source": "Quotation receipt",
+                            "reference": reference,
+                            "display": receipt_name,
+                            "path": receipt_path,
+                            "archive_name": receipt_archive,
+                            "key": f"quotation_receipt_{quote_id}",
+                        }
+                    )
 
     documents.sort(key=lambda d: (d["source"], d.get("reference") or "", d.get("display") or ""))
 
@@ -13673,12 +14277,27 @@ def customer_summary_page(conn):
         service_df,
         maintenance_df,
     )
-    st.download_button(
+    package_buffer = bundle_customer_package(
+        documents,
+        pdf_bytes,
+        info.get("name") or blank_label,
+    )
+    download_cols = st.columns(2)
+    download_cols[0].download_button(
         "⬇️ Download summary (PDF)",
         data=pdf_bytes,
         file_name=f"customer_summary_{clean_text(info.get('name')) or 'customer'}.pdf",
         mime="application/pdf",
     )
+    if package_buffer is not None:
+        archive_name = _sanitize_path_component(info.get("name") or blank_label)
+        download_cols[1].download_button(
+            "⬇️ Download full customer package (.zip)",
+            data=package_buffer.getvalue(),
+            file_name=f"{archive_name}_full_package.zip",
+            mime="application/zip",
+            key="cust_full_package",
+        )
 
 
 def scraps_page(conn):
@@ -13706,132 +14325,169 @@ def scraps_page(conn):
     scraps = fmt_dates(scraps, ["created_at", "purchase_date"])
     if scraps.empty:
         st.success("No scraps! All customer rows have the required details.")
-        return
+    else:
+        def missing_fields(row):
+            missing = []
+            for col, label in REQUIRED_CUSTOMER_FIELDS.items():
+                val = row.get(col)
+                if pd.isna(val) or str(val).strip() == "":
+                    missing.append(label)
+            return ", ".join(missing)
 
-    def missing_fields(row):
-        missing = []
-        for col, label in REQUIRED_CUSTOMER_FIELDS.items():
-            val = row.get(col)
-            if pd.isna(val) or str(val).strip() == "":
-                missing.append(label)
-        return ", ".join(missing)
+        scraps = scraps.assign(missing=scraps.apply(missing_fields, axis=1))
+        display_cols = ["name", "phone", "address", "remarks", "purchase_date", "product_info", "delivery_order_code", "missing", "created_at"]
+        st.dataframe(scraps[display_cols])
 
-    scraps = scraps.assign(missing=scraps.apply(missing_fields, axis=1))
-    display_cols = ["name", "phone", "address", "remarks", "purchase_date", "product_info", "delivery_order_code", "missing", "created_at"]
-    st.dataframe(scraps[display_cols])
-
-    st.markdown("### Update scrap record")
-    records = scraps.to_dict("records")
-    option_keys = [int(r["id"]) for r in records]
-    option_labels = {}
-    for r in records:
-        rid = int(r["id"])
-        name_label = clean_text(r.get("name")) or "(no name)"
-        missing_label = clean_text(r.get("missing")) or "—"
-        details = missing_label or "complete"
-        created = clean_text(r.get("created_at"))
-        created_fmt = f" – added {created}" if created else ""
-        option_labels[rid] = f"{name_label or '(no name)'} (missing: {details}){created_fmt}"
-    selected_id = st.selectbox(
-        "Choose a record to fix",
-        option_keys,
-        format_func=lambda k: option_labels[k],
-    )
-    selected = next(r for r in records if int(r["id"]) == selected_id)
-
-    def existing_value(key):
-        return clean_text(selected.get(key)) or ""
-
-    with st.form("scrap_update_form"):
-        name = st.text_input("Name", existing_value("name"))
-        phone = st.text_input("Phone", existing_value("phone"))
-        address = st.text_area("Address", existing_value("address"))
-        purchase = st.text_input("Purchase date (DD-MM-YYYY)", existing_value("purchase_date"))
-        product = st.text_input("Product", existing_value("product_info"))
-        do_code = st.text_input("Delivery order code", existing_value("delivery_order_code"))
-        remarks_text = st.text_area("Remarks", existing_value("remarks"))
-        col1, col2 = st.columns(2)
-        save = col1.form_submit_button("Save changes", type="primary")
-        delete = col2.form_submit_button("Delete scrap")
-
-    if save:
-        new_name = clean_text(name)
-        new_phone = clean_text(phone)
-        new_address = clean_text(address)
-        new_remarks = clean_text(remarks_text)
-        purchase_str, _ = date_strings_from_input(purchase)
-        new_product = clean_text(product)
-        new_do = clean_text(do_code)
-        old_phone = clean_text(selected.get("phone"))
-        conn.execute(
-            "UPDATE customers SET name=?, phone=?, address=?, remarks=?, purchase_date=?, product_info=?, delivery_order_code=?, dup_flag=0 WHERE customer_id=?",
-            (
-                new_name,
-                new_phone,
-                new_address,
-                new_remarks,
-                purchase_str,
-                new_product,
-                new_do,
-                int(selected_id),
-            ),
+        st.markdown("### Update scrap record")
+        records = scraps.to_dict("records")
+        option_keys = [int(r["id"]) for r in records]
+        option_labels = {}
+        for r in records:
+            rid = int(r["id"])
+            name_label = clean_text(r.get("name")) or "(no name)"
+            missing_label = clean_text(r.get("missing")) or "—"
+            details = missing_label or "complete"
+            created = clean_text(r.get("created_at"))
+            created_fmt = f" – added {created}" if created else ""
+            option_labels[rid] = f"{name_label or '(no name)'} (missing: {details}){created_fmt}"
+        selected_id = st.selectbox(
+            "Choose a record to fix",
+            option_keys,
+            format_func=lambda k: option_labels[k],
         )
-        old_do = clean_text(selected.get("delivery_order_code"))
-        if new_do:
+        selected = next(r for r in records if int(r["id"]) == selected_id)
+
+        def existing_value(key):
+            return clean_text(selected.get(key)) or ""
+
+        with st.form("scrap_update_form"):
+            name = st.text_input("Name", existing_value("name"))
+            phone = st.text_input("Phone", existing_value("phone"))
+            address = st.text_area("Address", existing_value("address"))
+            purchase = st.text_input("Purchase date (DD-MM-YYYY)", existing_value("purchase_date"))
+            product = st.text_input("Product", existing_value("product_info"))
+            do_code = st.text_input("Delivery order code", existing_value("delivery_order_code"))
+            remarks_text = st.text_area("Remarks", existing_value("remarks"))
+            col1, col2 = st.columns(2)
+            save = col1.form_submit_button("Save changes", type="primary")
+            delete = col2.form_submit_button("Delete scrap")
+
+        if save:
+            new_name = clean_text(name)
+            new_phone = clean_text(phone)
+            new_address = clean_text(address)
+            new_remarks = clean_text(remarks_text)
+            purchase_str, _ = date_strings_from_input(purchase)
+            new_product = clean_text(product)
+            new_do = clean_text(do_code)
+            old_phone = clean_text(selected.get("phone"))
             conn.execute(
-                """
-                INSERT INTO delivery_orders (do_number, customer_id, order_id, description, sales_person, remarks, file_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(do_number) DO UPDATE SET
-                    customer_id=excluded.customer_id,
-                    description=excluded.description,
-                    remarks=excluded.remarks
-                """,
+                "UPDATE customers SET name=?, phone=?, address=?, remarks=?, purchase_date=?, product_info=?, delivery_order_code=?, dup_flag=0 WHERE customer_id=?",
                 (
+                    new_name,
+                    new_phone,
+                    new_address,
+                    new_remarks,
+                    purchase_str,
+                    new_product,
                     new_do,
                     int(selected_id),
-                    None,
-                    new_product,
-                    None,
-                    new_remarks,
-                    None,
                 ),
             )
-        if old_do and old_do != new_do:
+            old_do = clean_text(selected.get("delivery_order_code"))
+            if new_do:
+                conn.execute(
+                    """
+                    INSERT INTO delivery_orders (do_number, customer_id, order_id, description, sales_person, remarks, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(do_number) DO UPDATE SET
+                        customer_id=excluded.customer_id,
+                        description=excluded.description,
+                        remarks=excluded.remarks,
+                        deleted_at=NULL,
+                        deleted_by=NULL
+                    """,
+                    (
+                        new_do,
+                        int(selected_id),
+                        None,
+                        new_product,
+                        None,
+                        new_remarks,
+                        None,
+                    ),
+                )
+            if old_do and old_do != new_do:
+                conn.execute(
+                    "DELETE FROM delivery_orders WHERE do_number=? AND (customer_id IS NULL OR customer_id=?)",
+                    (old_do, int(selected_id)),
+                )
+            if old_phone and old_phone != new_phone:
+                recalc_customer_duplicate_flag(conn, old_phone)
+            if new_phone:
+                recalc_customer_duplicate_flag(conn, new_phone)
+            conn.commit()
             conn.execute(
-                "DELETE FROM delivery_orders WHERE do_number=? AND (customer_id IS NULL OR customer_id=?)",
-                (old_do, int(selected_id)),
+                "UPDATE import_history SET customer_name=?, phone=?, address=?, delivery_address=?, product_label=?, do_number=?, original_date=? WHERE customer_id=? AND deleted_at IS NULL",
+                (
+                    new_name,
+                    new_phone,
+                    new_address,
+                    new_address,
+                    new_product,
+                    new_do,
+                    purchase_str,
+                    int(selected_id),
+                ),
             )
-        if old_phone and old_phone != new_phone:
-            recalc_customer_duplicate_flag(conn, old_phone)
-        if new_phone:
-            recalc_customer_duplicate_flag(conn, new_phone)
-        conn.commit()
-        conn.execute(
-            "UPDATE import_history SET customer_name=?, phone=?, address=?, delivery_address=?, product_label=?, do_number=?, original_date=? WHERE customer_id=? AND deleted_at IS NULL",
-            (
-                new_name,
-                new_phone,
-                new_address,
-                new_address,
-                new_product,
-                new_do,
-                purchase_str,
-                int(selected_id),
+            conn.commit()
+            if new_name and new_phone and new_address:
+                st.success("Details saved. This record is now complete and will appear in other pages.")
+            else:
+                st.info("Details saved, but the record is still incomplete and will remain in Scraps until all required fields are filled.")
+            _safe_rerun()
+
+        if delete:
+            conn.execute("DELETE FROM customers WHERE customer_id=?", (int(selected_id),))
+            conn.commit()
+            st.warning("Scrap record deleted.")
+            _safe_rerun()
+
+    if current_user_is_admin():
+        st.markdown("### Deleted staff submissions")
+        deleted_log = df_query(
+            conn,
+            dedent(
+                """
+                SELECT a.created_at,
+                       a.event_type,
+                       a.description,
+                       COALESCE(u.username, 'User #' || a.user_id) AS actor
+                FROM activity_log a
+                LEFT JOIN users u ON u.user_id = a.user_id
+                WHERE a.event_type LIKE '%_deleted'
+                ORDER BY datetime(a.created_at) DESC
+                LIMIT 200
+                """
             ),
         )
-        conn.commit()
-        if new_name and new_phone and new_address:
-            st.success("Details saved. This record is now complete and will appear in other pages.")
+        if deleted_log.empty:
+            st.caption("No deleted submissions recorded yet.")
         else:
-            st.info("Details saved, but the record is still incomplete and will remain in Scraps until all required fields are filled.")
-        _safe_rerun()
-
-    if delete:
-        conn.execute("DELETE FROM customers WHERE customer_id=?", (int(selected_id),))
-        conn.commit()
-        st.warning("Scrap record deleted.")
-        _safe_rerun()
+            deleted_log = fmt_dates(deleted_log, ["created_at"])
+            deleted_log = deleted_log.rename(
+                columns={
+                    "created_at": "When",
+                    "event_type": "Event",
+                    "description": "Details",
+                    "actor": "Staff",
+                }
+            )
+            st.dataframe(
+                deleted_log[["When", "Staff", "Event", "Details"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 # ---------- Import helpers ----------
 def refine_multiline(df: pd.DataFrame) -> pd.DataFrame:
@@ -15023,6 +15679,40 @@ def delete_import_entry(conn, record: dict) -> None:
         conn.commit()
 
 
+def delete_work_report(
+    conn,
+    *,
+    report_id: int,
+    owner_id: Optional[int],
+    owner_label: Optional[str],
+    period_type: Optional[str],
+    period_start: Optional[str],
+    period_end: Optional[str],
+    report_template: Optional[str],
+) -> None:
+    conn.execute("DELETE FROM work_reports WHERE report_id=?", (int(report_id),))
+    conn.commit()
+    template_key = _normalize_report_template(report_template)
+    template_label = REPORT_TEMPLATE_LABELS.get(template_key, "Service report")
+    cadence_label = format_period_label(period_type)
+    period_label = format_period_range(period_start, period_end)
+    owner_text = owner_label or (
+        f"User #{int(owner_id)}" if owner_id is not None else "team member"
+    )
+    description = (
+        f"Deleted {template_label.lower()} {cadence_label.lower()} report for "
+        f"{owner_text} ({period_label})"
+    )
+    log_activity(
+        conn,
+        event_type="report_deleted",
+        description=description,
+        entity_type="report",
+        entity_id=int(report_id),
+        user_id=current_user_id(),
+    )
+
+
 def _normalize_report_text(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -15048,6 +15738,8 @@ def upsert_work_report(
     grid_rows: Optional[Iterable[dict]] = None,
     attachment_path=_ATTACHMENT_UNCHANGED,
     current_attachment: Optional[str] = None,
+    import_file_path=_ATTACHMENT_UNCHANGED,
+    current_import_file: Optional[str] = None,
 ) -> int:
     if user_id is None:
         raise ValueError("User is required to save a report.")
@@ -15070,7 +15762,7 @@ def upsert_work_report(
     effective_id = report_id
     cur.execute(
         """
-        SELECT report_id, attachment_path
+        SELECT report_id, attachment_path, import_file_path
         FROM work_reports
         WHERE user_id=? AND period_type=? AND period_start=?
         LIMIT 1
@@ -15084,6 +15776,8 @@ def upsert_work_report(
             effective_id = existing_id
             if current_attachment is None:
                 current_attachment = row[1]
+            if current_import_file is None:
+                current_import_file = row[2]
         elif existing_id != effective_id:
             raise ValueError(
                 "Another report already exists for this period. Select it from the dropdown to edit."
@@ -15091,25 +15785,32 @@ def upsert_work_report(
 
     if effective_id is not None and current_attachment is None:
         cur.execute(
-            "SELECT attachment_path FROM work_reports WHERE report_id=?",
+            "SELECT attachment_path, import_file_path FROM work_reports WHERE report_id=?",
             (effective_id,),
         )
         match = cur.fetchone()
         if match:
             current_attachment = match[0]
+            if current_import_file is None:
+                current_import_file = match[1]
 
     if attachment_path is _ATTACHMENT_UNCHANGED:
         attachment_value = current_attachment
     else:
         attachment_value = attachment_path
 
+    if import_file_path is _ATTACHMENT_UNCHANGED:
+        import_value = current_import_file
+    else:
+        import_value = import_file_path
+
     created_new = False
     if effective_id is None:
         try:
             cur.execute(
                 """
-                INSERT INTO work_reports (user_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, report_template)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO work_reports (user_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, import_file_path, report_template)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -15121,6 +15822,7 @@ def upsert_work_report(
                     research_val,
                     grid_payload_val,
                     attachment_value,
+                    import_value,
                     template_key,
                 ),
             )
@@ -15135,7 +15837,7 @@ def upsert_work_report(
             cur.execute(
                 """
                 UPDATE work_reports
-                SET period_type=?, period_start=?, period_end=?, tasks=?, remarks=?, research=?, grid_payload=?, attachment_path=?, report_template=?, updated_at=datetime('now')
+                SET period_type=?, period_start=?, period_end=?, tasks=?, remarks=?, research=?, grid_payload=?, attachment_path=?, import_file_path=?, report_template=?, updated_at=datetime('now')
                 WHERE report_id=?
                 """,
                 (
@@ -15147,6 +15849,7 @@ def upsert_work_report(
                     research_val,
                     grid_payload_val,
                     attachment_value,
+                    import_value,
                     template_key,
                     effective_id,
                 ),
@@ -15473,7 +16176,7 @@ def reports_page(conn):
         conn,
         dedent(
             """
-            SELECT report_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, report_template, created_at, updated_at
+            SELECT report_id, user_id, period_type, period_start, period_end, tasks, remarks, research, grid_payload, attachment_path, import_file_path, report_template, created_at, updated_at
             FROM work_reports
             WHERE user_id=?
             ORDER BY date(period_start) DESC, report_id DESC
@@ -15566,6 +16269,44 @@ def reports_page(conn):
         ]
         if not match.empty:
             editing_record = match.iloc[0].to_dict()
+    if selected_report_id is not None and editing_record:
+        owner_seed = editing_record.get("user_id")
+        owner_id = None
+        if owner_seed is not None:
+            owner_id = int(_coerce_float(owner_seed, -1))
+            if owner_id < 0:
+                owner_id = None
+        owner_label = label_map.get(owner_id, f"User #{owner_id}") if owner_id else None
+        can_delete = is_admin or (
+            owner_id is not None and viewer_id is not None and owner_id == viewer_id
+        )
+        if can_delete:
+            with st.expander("Delete report", expanded=False):
+                st.warning(
+                    "Deleting removes the report from the system. Uploaded files stay in storage for admin review."
+                )
+                confirm_delete = st.checkbox(
+                    "I understand, delete this report",
+                    key=f"report_delete_confirm_{selected_report_id}",
+                )
+                if st.button(
+                    "Delete report",
+                    type="secondary",
+                    disabled=not confirm_delete,
+                    key=f"report_delete_button_{selected_report_id}",
+                ):
+                    delete_work_report(
+                        conn,
+                        report_id=int(selected_report_id),
+                        owner_id=owner_id,
+                        owner_label=owner_label,
+                        period_type=clean_text(editing_record.get("period_type")),
+                        period_start=clean_text(editing_record.get("period_start")),
+                        period_end=clean_text(editing_record.get("period_end")),
+                        report_template=clean_text(editing_record.get("report_template")),
+                    )
+                    st.warning("Report deleted.")
+                    _safe_rerun()
     template_key = _normalize_report_template(
         editing_record.get("report_template") if editing_record else None
     )
@@ -15638,9 +16379,13 @@ def reports_page(conn):
     existing_attachment_value: Optional[str] = (
         editing_record.get("attachment_path") if editing_record else None
     )
+    existing_import_value: Optional[str] = (
+        editing_record.get("import_file_path") if editing_record else None
+    )
 
     st.markdown("##### Import report data")
     import_payload = st.session_state.get("report_grid_import_payload")
+    import_payload_is_new = False
     import_file = st.file_uploader(
         "Upload report grid (Excel or CSV)",
         type=["xlsx", "xls", "csv"],
@@ -15649,6 +16394,7 @@ def reports_page(conn):
     )
     uploaded_df: Optional[pd.DataFrame] = None
     if import_file is not None:
+        import_payload_is_new = True
         import_payload = {
             "name": import_file.name,
             "data": import_file.getvalue(),
@@ -15763,6 +16509,19 @@ def reports_page(conn):
             existing_attachment_bytes = existing_attachment_path.read_bytes()
         except OSError:
             existing_attachment_bytes = None
+    existing_import_path = (
+        resolve_upload_path(existing_import_value)
+        if existing_import_value
+        else None
+    )
+    existing_import_bytes: Optional[bytes] = None
+    existing_import_name: Optional[str] = None
+    if existing_import_path and existing_import_path.exists():
+        existing_import_name = existing_import_path.name
+        try:
+            existing_import_bytes = existing_import_path.read_bytes()
+        except OSError:
+            existing_import_bytes = None
 
     with st.form("work_report_form"):
         period_choice = st.selectbox(
@@ -15889,6 +16648,20 @@ def reports_page(conn):
                 "Remove current attachment",
                 key="report_remove_attachment",
             )
+        if existing_import_value:
+            st.caption("Imported file")
+            if existing_import_bytes and existing_import_name:
+                st.download_button(
+                    "Download imported file",
+                    data=existing_import_bytes,
+                    file_name=existing_import_name,
+                    key="report_import_download",
+                )
+            else:
+                st.warning(
+                    "The saved import file could not be located on disk.",
+                    icon="⚠️",
+                )
         attachment_upload = st.file_uploader(
             "Attach supporting document (PDF, image, or Excel)",
             type=["pdf", "png", "jpg", "jpeg", "webp", "gif", "xlsx", "xls"],
@@ -15899,6 +16672,7 @@ def reports_page(conn):
 
     if submitted:
         cleanup_path: Optional[str] = None
+        cleanup_import_path: Optional[str] = None
         grid_rows_to_store = _grid_rows_from_editor(
             report_grid_df, template_key=template_key
         )
@@ -15923,6 +16697,7 @@ def reports_page(conn):
             st.error(str(err))
         else:
             attachment_to_store = _ATTACHMENT_UNCHANGED
+            import_file_to_store = _ATTACHMENT_UNCHANGED
             attachment_save_failed = False
             save_allowed = True
 
@@ -15970,6 +16745,23 @@ def reports_page(conn):
                 attachment_to_store = None
                 cleanup_path = existing_attachment_value
 
+            if save_allowed and import_payload_is_new and import_payload:
+                identifier = (
+                    f"user{report_owner_id}_{normalized_key}_{normalized_start.isoformat()}"
+                )
+                stored_import = store_report_import_file(
+                    import_payload.get("name") or "report_import",
+                    import_payload.get("data") or b"",
+                    identifier=identifier,
+                )
+                if stored_import:
+                    import_file_to_store = stored_import
+                    if existing_import_value:
+                        cleanup_import_path = existing_import_value
+                else:
+                    st.error("Imported file could not be saved. Please try again.")
+                    attachment_save_failed = True
+
             if save_allowed and not attachment_save_failed:
                 if not grid_rows_to_store:
                     st.error("Add at least one row to the report grid before saving.")
@@ -15989,6 +16781,8 @@ def reports_page(conn):
                             grid_rows=grid_rows_to_store,
                             attachment_path=attachment_to_store,
                             current_attachment=existing_attachment_value,
+                            import_file_path=import_file_to_store,
+                            current_import_file=existing_import_value,
                         )
                     except ValueError as err:
                         st.error(str(err))
@@ -15999,8 +16793,14 @@ def reports_page(conn):
                             if old_path and old_path.exists():
                                 with contextlib.suppress(OSError):
                                     old_path.unlink()
+                        if cleanup_import_path:
+                            old_import = resolve_upload_path(cleanup_import_path)
+                            if old_import and old_import.exists():
+                                with contextlib.suppress(OSError):
+                                    old_import.unlink()
                         st.session_state["report_edit_select_pending"] = saved_id
                         st.session_state.pop("report_attachment_uploader", None)
+                        st.session_state.pop("report_grid_import_payload", None)
                         _safe_rerun()
 
     st.markdown("---")
@@ -16096,7 +16896,7 @@ def reports_page(conn):
         dedent(
             f"""
             SELECT wr.report_id, wr.user_id, wr.period_type, wr.period_start, wr.period_end,
-                   wr.tasks, wr.remarks, wr.research, wr.grid_payload, wr.attachment_path, wr.report_template, wr.created_at, wr.updated_at,
+                   wr.tasks, wr.remarks, wr.research, wr.grid_payload, wr.attachment_path, wr.import_file_path, wr.report_template, wr.created_at, wr.updated_at,
                    u.username
             FROM work_reports wr
             JOIN users u ON u.user_id = wr.user_id
