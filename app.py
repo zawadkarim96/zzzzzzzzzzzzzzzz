@@ -444,6 +444,8 @@ def customer_incomplete_clause(alias: str = "") -> str:
     return f"NOT ({customer_complete_clause(alias)})"
 
 # ---------- Schema ----------
+ADMIN_DEFAULT_PASSWORD = "PANNAPS123"
+
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
@@ -695,6 +697,12 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_log_entity ON activity_log(entity_type, entity_id);
+CREATE TRIGGER IF NOT EXISTS prevent_admin_delete
+BEFORE DELETE ON users
+WHEN LOWER(OLD.role) = 'admin'
+BEGIN
+    SELECT RAISE(ABORT, 'Cannot delete admin user');
+END;
 """
 
 # ---------- Helpers ----------
@@ -712,7 +720,7 @@ def init_schema(conn):
     cur = conn.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
         admin_user = os.getenv("ADMIN_USER", "admin")
-        admin_pass = os.getenv("ADMIN_PASS", "admin123")
+        admin_pass = os.getenv("ADMIN_PASS", ADMIN_DEFAULT_PASSWORD)
         h = hashlib.sha256(admin_pass.encode("utf-8")).hexdigest()
         conn.execute("INSERT INTO users (username, pass_hash, role) VALUES (?, ?, 'admin')", (admin_user, h))
         conn.commit()
@@ -726,6 +734,14 @@ def ensure_schema_upgrades(conn):
     def add_column(table: str, column: str, definition: str) -> None:
         if not has_column(table, column):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def ensure_trigger(name: str, sql: str) -> None:
+        cur = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+            (name,),
+        )
+        if cur.fetchone() is None:
+            conn.execute(sql)
 
     add_column("customers", "company_name", "TEXT")
     add_column("customers", "delivery_address", "TEXT")
@@ -758,6 +774,24 @@ def ensure_schema_upgrades(conn):
     add_column("maintenance_records", "maintenance_start_date", "TEXT")
     add_column("maintenance_records", "maintenance_end_date", "TEXT")
     add_column("maintenance_records", "maintenance_product_info", "TEXT")
+
+    ensure_trigger(
+        "prevent_admin_delete",
+        """
+        CREATE TRIGGER prevent_admin_delete
+        BEFORE DELETE ON users
+        WHEN LOWER(OLD.role) = 'admin'
+        BEGIN
+            SELECT RAISE(ABORT, 'Cannot delete admin user');
+        END;
+        """,
+    )
+
+    admin_hash = hashlib.sha256(ADMIN_DEFAULT_PASSWORD.encode("utf-8")).hexdigest()
+    conn.execute(
+        "UPDATE users SET pass_hash=? WHERE LOWER(username)='admin'",
+        (admin_hash,),
+    )
     add_column("maintenance_records", "created_by", "INTEGER")
     add_column("quotations", "document_path", "TEXT")
     add_column("warranties", "remarks", "TEXT")
@@ -1365,8 +1399,16 @@ def _extract_quotation_metadata(text: str) -> dict[str, object]:
     def _header_value(prefix: str) -> Optional[str]:
         for line in lines:
             if line.lower().startswith(prefix.lower()):
-                candidate = line.split(":", 1)[-1].strip()
-                return candidate or None
+                match = re.match(
+                    rf"^{re.escape(prefix)}[:\s,\-]*?(.*)$",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                candidate = match.group(1).strip()
+                if candidate:
+                    return candidate
         return None
 
     def _collect_after(keyword: str, max_lines: int = 6) -> list[str]:
@@ -1375,6 +1417,12 @@ def _extract_quotation_metadata(text: str) -> dict[str, object]:
                 collected: list[str] = []
                 for entry in lines[idx + 1 : idx + 1 + max_lines]:
                     if not entry.strip():
+                        break
+                    if re.match(
+                        r"^(subject|attn\.?|attention|dear|ref\.?|reference|date|phone|tel|mobile|email)\b",
+                        entry.strip(),
+                        flags=re.IGNORECASE,
+                    ):
                         break
                     collected.append(entry)
                 return collected
@@ -1466,9 +1514,6 @@ def _extract_quotation_metadata(text: str) -> dict[str, object]:
             r"customer[:\s]*([^\n]+)",
         ]
     )
-    if company:
-        updates["quotation_company_name"] = company
-
     phone = _match([r"(?:phone|tel|mobile)[:\s]*([+\d][\d\s\-()]+)", r"(?:cell|contact)[:\s]*([+\d][\d\s\-()]+)"])
     if phone:
         updates["quotation_customer_contact"] = phone
@@ -1483,8 +1528,20 @@ def _extract_quotation_metadata(text: str) -> dict[str, object]:
 
     address_block = _collect_after("to")
     address = _match([r"address[:\s]*([^\n]+(?:\n[^\n]+){0,3})", r"(?:office|site)\s*address[:\s]*([^\n]+)"])
+    address_lines = []
     if address_block:
-        updates["quotation_customer_address"] = "\n".join(address_block)
+        if not company:
+            company = address_block[0]
+            address_lines = address_block[1:]
+        else:
+            if address_block and clean_text(address_block[0]) == clean_text(company):
+                address_lines = address_block[1:]
+            else:
+                address_lines = address_block
+    if company:
+        updates["quotation_company_name"] = company
+    if address_lines:
+        updates["quotation_customer_address"] = "\n".join(address_lines)
     elif address:
         updates["quotation_customer_address"] = address.replace("\n", " ")
 
@@ -3777,6 +3834,7 @@ def _build_quotations_export(conn) -> pd.DataFrame:
                reference,
                quote_date,
                customer_company,
+               customer_name,
                customer_contact,
                customer_address,
                customer_district,
@@ -3809,7 +3867,8 @@ def _build_quotations_export(conn) -> pd.DataFrame:
             "reference": "Reference",
             "quote_date": "Quote date",
             "customer_company": "Customer",
-            "customer_contact": "Contact",
+            "customer_name": "Contact name",
+            "customer_contact": "Contact details",
             "customer_address": "Address",
             "customer_district": "District",
             "attention_name": "Attention",
@@ -10600,6 +10659,15 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
             key="quotation_customer_address",
         )
 
+        quote_type = st.selectbox(
+            "Quotation type",
+            ["Retail", "Wholesale"],
+            index=0
+            if clean_text(st.session_state.get("quotation_quote_type")) != "Wholesale"
+            else 1,
+            key="quotation_quote_type",
+        )
+
         st.markdown("### Product / service details")
         item_rows = st.session_state.get("quotation_item_rows") or _default_quotation_items()
         items_df = pd.DataFrame(item_rows)
@@ -10729,7 +10797,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
         reset = form_actions[1].form_submit_button("Reset form")
 
     template_choice = "Default letterhead"
-    quote_type = st.session_state.get("quotation_quote_type", "Standard")
+    quote_type = st.session_state.get("quotation_quote_type", "Retail")
     default_discount = _coerce_float(
         st.session_state.get("quotation_discount_default"), 0.0
     )
@@ -10797,6 +10865,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
         metadata["Customer address"] = customer_address
         metadata["Customer contact"] = customer_contact_combined
         metadata["Attention name"] = attention_name
+        metadata["Quote type"] = quote_type
         metadata["Notes / terms"] = terms_notes
         metadata["Salesperson name"] = prepared_by
         metadata["Salesperson title"] = salesperson_title
@@ -10937,7 +11006,7 @@ def _render_quotation_management(conn):
         conn,
         dedent(
             f"""
-            SELECT q.quotation_id, q.reference, q.quote_date, q.customer_company, q.customer_contact,
+            SELECT q.quotation_id, q.reference, q.quote_date, q.customer_company, q.customer_name, q.customer_contact,
                    q.total_amount, q.status, q.follow_up_status, q.follow_up_notes, q.follow_up_date,
                    q.reminder_label, q.payment_receipt_path, q.created_by, COALESCE(u.username, '(user)') AS created_by_name
             FROM quotations q
@@ -11033,6 +11102,7 @@ def _render_quotation_management(conn):
         "reminder_label": st.column_config.TextColumn("Reminder"),
         "reference": st.column_config.TextColumn("Reference"),
         "customer_company": st.column_config.TextColumn("Customer"),
+        "customer_name": st.column_config.TextColumn("Contact name"),
         "customer_contact": st.column_config.TextColumn("Contact"),
         "total_amount": st.column_config.TextColumn("Total amount (BDT)"),
         "quote_date": st.column_config.TextColumn("Quote date"),
@@ -11090,7 +11160,9 @@ def _render_quotation_management(conn):
             except Exception:
                 continue
             reference = clean_text(record.get("reference")) or f"Quotation #{qid}"
-            customer = clean_text(record.get("customer_company")) or clean_text(record.get("customer_contact"))
+            customer = clean_text(record.get("customer_company")) or clean_text(
+                record.get("customer_name")
+            ) or clean_text(record.get("customer_contact"))
             status_labels[qid] = " • ".join(part for part in [reference, customer] if part)
         selectable_ids = list(status_labels.keys())
         selected_id = st.selectbox(
@@ -11179,8 +11251,8 @@ def _render_quotation_management(conn):
             continue
         reference = clean_text(row.get("reference")) or f"Quotation #{detail_id}"
         customer = clean_text(row.get("customer_company")) or clean_text(
-            row.get("customer_contact")
-        )
+            row.get("customer_name")
+        ) or clean_text(row.get("customer_contact"))
         detail_labels[detail_id] = " • ".join(
             part for part in [reference, customer] if part
         )
@@ -14104,9 +14176,17 @@ def users_admin_page(conn):
             conn.commit()
             st.success("Password updated")
         if col2.button("Delete user"):
-            conn.execute("DELETE FROM users WHERE user_id=?", (int(uid),))
-            conn.commit()
-            st.warning("User deleted")
+            role_row = conn.execute(
+                "SELECT role FROM users WHERE user_id=?",
+                (int(uid),),
+            ).fetchone()
+            role_value = clean_text(role_row[0]) if role_row else ""
+            if role_value.lower() == "admin":
+                st.error("Admin users cannot be deleted.")
+            else:
+                conn.execute("DELETE FROM users WHERE user_id=?", (int(uid),))
+                conn.commit()
+                st.warning("User deleted")
 
 # ---------- Import engine ----------
 def _import_clean6(conn, df, tag="Import"):
