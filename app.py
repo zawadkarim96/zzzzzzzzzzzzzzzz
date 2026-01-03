@@ -15822,49 +15822,173 @@ def duplicates_page(conn):
             editor_df["purchase_date"] = pd.to_datetime(editor_df["purchase_date"], errors="coerce")
             editor_df["created_at"] = pd.to_datetime(editor_df["created_at"], errors="coerce")
             editor_df["Action"] = "Keep"
-            column_order = [
-                col
-                for col in [
-                    "id",
-                    "name",
-                    "phone",
-                    "address",
-                    "purchase_date",
-                    "product_info",
-                    "delivery_order_code",
-                    "duplicate",
-                    "created_at",
-                    "Action",
-                ]
-                if col in editor_df.columns
-            ]
-            editor_df = editor_df[column_order]
             st.markdown("#### Edit duplicate entries")
-            editor_state = st.data_editor(
-                editor_df,
-                hide_index=True,
-                num_rows="fixed",
-                use_container_width=True,
-                column_config={
-                    "id": st.column_config.Column("ID", disabled=True),
-                    "name": st.column_config.TextColumn("Name"),
-                    "phone": st.column_config.TextColumn("Phone"),
-                    "address": st.column_config.TextColumn("Address"),
-                    "purchase_date": st.column_config.DateColumn("Purchase date", format="DD-MM-YYYY", required=False),
-                    "product_info": st.column_config.TextColumn("Product"),
-                    "delivery_order_code": st.column_config.TextColumn("DO code"),
-                    "duplicate": st.column_config.Column("Duplicate", disabled=True),
-                    "created_at": st.column_config.DatetimeColumn("Created", format="DD-MM-YYYY HH:mm", disabled=True),
-                    "Action": st.column_config.SelectboxColumn("Action", options=["Keep", "Delete"], required=True),
-                },
-            )
+            doc_type_options = [
+                "Delivery order",
+                "Work done",
+                "Quotation",
+                "Service",
+                "Maintenance",
+                "Other",
+            ]
+            header_cols = st.columns((0.6, 1.4, 1.2, 1.8, 1.1, 1.6, 1.1, 1.0, 1.3, 1.3, 1.3, 1.0))
+            header_cols[0].write("**ID**")
+            header_cols[1].write("**Name**")
+            header_cols[2].write("**Phone**")
+            header_cols[3].write("**Address**")
+            header_cols[4].write("**Purchase date**")
+            header_cols[5].write("**Product**")
+            header_cols[6].write("**DO code**")
+            header_cols[7].write("**Duplicate**")
+            header_cols[8].write("**File type**")
+            header_cols[9].write("**➕ Upload**")
+            header_cols[10].write("**Created**")
+            header_cols[11].write("**Action**")
+            editor_rows = []
+            for _, row in editor_df.iterrows():
+                cid = int_or_none(row.get("id"))
+                if cid is None:
+                    continue
+                row_cols = st.columns((0.6, 1.4, 1.2, 1.8, 1.1, 1.6, 1.1, 1.0, 1.3, 1.3, 1.3, 1.0))
+                row_cols[0].write(cid)
+                name_key = f"dup_name_{cid}"
+                phone_key = f"dup_phone_{cid}"
+                address_key = f"dup_address_{cid}"
+                purchase_key = f"dup_purchase_{cid}"
+                product_key = f"dup_product_{cid}"
+                do_key = f"dup_do_{cid}"
+                file_type_key = f"dup_file_type_{cid}"
+                upload_key = f"dup_upload_{cid}"
+                upload_btn_key = f"dup_upload_btn_{cid}"
+                action_key = f"dup_action_{cid}"
+                created_at = row.get("created_at")
+                created_label = ""
+                if isinstance(created_at, (datetime, pd.Timestamp)) and not pd.isna(created_at):
+                    created_label = created_at.strftime("%d-%m-%Y %H:%M")
+                purchase_date_value = row.get("purchase_date")
+                purchase_date_label = ""
+                if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
+                    purchase_date_label = purchase_date_value.strftime(DATE_FMT)
+                row_cols[1].text_input(
+                    "Name",
+                    value=clean_text(row.get("name")) or "",
+                    key=name_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[2].text_input(
+                    "Phone",
+                    value=clean_text(row.get("phone")) or "",
+                    key=phone_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[3].text_input(
+                    "Address",
+                    value=clean_text(row.get("address")) or "",
+                    key=address_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[4].text_input(
+                    "Purchase date",
+                    value=purchase_date_label,
+                    key=purchase_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[5].text_input(
+                    "Product",
+                    value=clean_text(row.get("product_info")) or "",
+                    key=product_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[6].text_input(
+                    "DO code",
+                    value=clean_text(row.get("delivery_order_code")) or "",
+                    key=do_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[7].write("🔁 duplicate phone")
+                row_cols[8].selectbox(
+                    "File type",
+                    options=doc_type_options,
+                    key=file_type_key,
+                    label_visibility="collapsed",
+                )
+                upload_file = row_cols[9].file_uploader(
+                    "Upload document",
+                    type=["pdf", "png", "jpg", "jpeg", "webp"],
+                    key=upload_key,
+                    label_visibility="collapsed",
+                )
+                if row_cols[9].button("➕", key=upload_btn_key, help="Upload document"):
+                    if upload_file is None:
+                        st.warning("Select a file to upload.")
+                    else:
+                        doc_type = st.session_state.get(file_type_key) or "Other"
+                        doc_type_slug = (
+                            _sanitize_path_component(doc_type.lower().replace(" ", "_"))
+                            or "document"
+                        )
+                        target_dir = CUSTOMER_DOCS_DIR / doc_type_slug
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        original_name = upload_file.name or f"{doc_type_slug}_{cid}.pdf"
+                        safe_original = Path(original_name).name
+                        filename = f"{doc_type_slug}_{cid}_{safe_original}"
+                        saved_path = save_uploaded_file(
+                            upload_file,
+                            target_dir,
+                            filename=filename,
+                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                            default_extension=".pdf",
+                        )
+                        if saved_path:
+                            try:
+                                stored_path = str(saved_path.relative_to(BASE_DIR))
+                            except ValueError:
+                                stored_path = str(saved_path)
+                            conn.execute(
+                                """
+                                INSERT INTO customer_documents (
+                                    customer_id, doc_type, file_path, original_name, uploaded_by
+                                ) VALUES (?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    cid,
+                                    doc_type,
+                                    stored_path,
+                                    safe_original,
+                                    current_user_id(),
+                                ),
+                            )
+                            conn.commit()
+                            st.success("Document uploaded.")
+                            _safe_rerun()
+                        else:
+                            st.error("Unable to save the uploaded file.")
+                row_cols[10].write(created_label or "-")
+                row_cols[11].selectbox(
+                    "Action",
+                    options=["Keep", "Delete"],
+                    key=action_key,
+                    label_visibility="collapsed",
+                )
+                editor_rows.append(
+                    {
+                        "id": cid,
+                        "name": st.session_state.get(name_key),
+                        "phone": st.session_state.get(phone_key),
+                        "address": st.session_state.get(address_key),
+                        "purchase_date": st.session_state.get(purchase_key),
+                        "product_info": st.session_state.get(product_key),
+                        "delivery_order_code": st.session_state.get(do_key),
+                        "Action": st.session_state.get(action_key),
+                    }
+                )
             user = st.session_state.user or {}
             is_admin = user.get("role") == "admin"
             if not is_admin:
                 st.caption("Deleting rows requires admin privileges; non-admin delete actions will be ignored.")
             raw_map = {int(row["id"]): row for row in duplicate_customers.to_dict("records") if int_or_none(row.get("id")) is not None}
             if st.button("Apply duplicate table updates", type="primary"):
-                editor_result = editor_state if isinstance(editor_state, pd.DataFrame) else pd.DataFrame(editor_state)
+                editor_result = pd.DataFrame(editor_rows)
                 if editor_result.empty:
                     st.info("No rows to update.")
                 else:
