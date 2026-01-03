@@ -8324,6 +8324,7 @@ def customers_page(conn):
             """
             SELECT g.group_id,
                    g.name,
+                   g.updated_at,
                    COUNT(m.customer_id) AS member_count
             FROM customer_groups g
             LEFT JOIN customer_group_members m ON m.group_id = g.group_id
@@ -8331,8 +8332,8 @@ def customers_page(conn):
             ORDER BY LOWER(g.name) ASC
             """,
         )
-        group_options: list[Optional[int]] = [None]
-        group_labels: dict[Optional[int], str] = {None: "Create new group"}
+        group_options: list[int] = []
+        group_labels: dict[int, str] = {}
         group_name_lookup: dict[int, str] = {}
         if not groups_df.empty:
             for _, row in groups_df.iterrows():
@@ -8342,80 +8343,98 @@ def customers_page(conn):
                 group_options.append(group_id)
                 group_labels[group_id] = f"{group_name} ({count})"
                 group_name_lookup[group_id] = group_name
-        selected_group = st.selectbox(
-            "Select group",
-            options=group_options,
-            format_func=lambda gid: group_labels.get(gid, "Create new group"),
-            key="customer_group_selector",
+
+        mode = st.radio(
+            "Group action",
+            ["Create new group", "Edit existing group"],
+            horizontal=True,
+            key="customer_group_mode",
         )
-        member_ids: list[int] = []
-        if selected_group:
-            members_df = df_query(
-                conn,
-                "SELECT customer_id FROM customer_group_members WHERE group_id=?",
-                (int(selected_group),),
-            )
-            if not members_df.empty:
-                member_ids = [
-                    int(cid)
-                    for cid in members_df["customer_id"].dropna().astype(int).tolist()
-                ]
-        default_name = group_name_lookup.get(int(selected_group)) if selected_group else ""
-        with st.form("customer_group_form"):
-            group_name = st.text_input(
-                "Group name",
-                value=default_name,
-                help="Use a clear name (e.g., Hospital clients, VIPs, Dhaka West).",
-            )
-            selected_members = st.multiselect(
-                "Customers in this group",
-                options=customer_choices,
-                default=member_ids,
-                format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
-            )
-            save_group = st.form_submit_button("Save group", type="primary")
-        if save_group:
-            group_name_clean = clean_text(group_name)
-            if not group_name_clean:
-                st.error("Group name is required.")
+        selected_group = None
+        if mode == "Edit existing group":
+            if not group_options:
+                st.info("No groups created yet. Use 'Create new group' to add one.")
             else:
-                cursor = conn.cursor()
-                if selected_group:
-                    cursor.execute(
-                        """
-                        UPDATE customer_groups
-                           SET name=?, updated_at=datetime('now')
-                         WHERE group_id=?
-                        """,
-                        (group_name_clean, int(selected_group)),
-                    )
-                    group_id = int(selected_group)
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO customer_groups (name, created_by, updated_at)
-                        VALUES (?, ?, datetime('now'))
-                        """,
-                        (group_name_clean, current_user_id()),
-                    )
-                    group_id = int(cursor.lastrowid)
-                cursor.execute(
-                    "DELETE FROM customer_group_members WHERE group_id=?",
-                    (group_id,),
+                selected_group = st.selectbox(
+                    "Select group to edit",
+                    options=group_options,
+                    format_func=lambda gid: group_labels.get(gid, f"Group #{gid}"),
+                    key="customer_group_selector",
                 )
-                for cid in selected_members:
-                    if cid is None:
-                        continue
+
+        form_enabled = mode == "Create new group" or selected_group
+        if not form_enabled:
+            st.info("Select a group to edit, or switch to 'Create new group'.")
+        else:
+            member_ids: list[int] = []
+            if selected_group:
+                members_df = df_query(
+                    conn,
+                    "SELECT customer_id FROM customer_group_members WHERE group_id=?",
+                    (int(selected_group),),
+                )
+                if not members_df.empty:
+                    member_ids = [
+                        int(cid)
+                        for cid in members_df["customer_id"].dropna().astype(int).tolist()
+                    ]
+            default_name = group_name_lookup.get(int(selected_group)) if selected_group else ""
+            group_label = "Rename group" if selected_group else "Group name"
+            with st.form("customer_group_form"):
+                group_name = st.text_input(
+                    group_label,
+                    value=default_name,
+                    help="Use a clear name (e.g., Hospital clients, VIPs, Dhaka West).",
+                )
+                selected_members = st.multiselect(
+                    "Customers in this group",
+                    options=customer_choices,
+                    default=member_ids,
+                    format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
+                )
+                save_group = st.form_submit_button("Save group", type="primary")
+            if save_group:
+                group_name_clean = clean_text(group_name)
+                if not group_name_clean:
+                    st.error("Group name is required.")
+                else:
+                    cursor = conn.cursor()
+                    if selected_group:
+                        cursor.execute(
+                            """
+                            UPDATE customer_groups
+                               SET name=?, updated_at=datetime('now')
+                             WHERE group_id=?
+                            """,
+                            (group_name_clean, int(selected_group)),
+                        )
+                        group_id = int(selected_group)
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO customer_groups (name, created_by, updated_at)
+                            VALUES (?, ?, datetime('now'))
+                            """,
+                            (group_name_clean, current_user_id()),
+                        )
+                        group_id = int(cursor.lastrowid)
                     cursor.execute(
-                        """
-                        INSERT OR IGNORE INTO customer_group_members (group_id, customer_id)
-                        VALUES (?, ?)
-                        """,
-                        (group_id, int(cid)),
+                        "DELETE FROM customer_group_members WHERE group_id=?",
+                        (group_id,),
                     )
-                conn.commit()
-                st.success("Customer group saved.")
-                _safe_rerun()
+                    for cid in selected_members:
+                        if cid is None:
+                            continue
+                        cursor.execute(
+                            """
+                            INSERT OR IGNORE INTO customer_group_members (group_id, customer_id)
+                            VALUES (?, ?)
+                            """,
+                            (group_id, int(cid)),
+                        )
+                    conn.commit()
+                    st.success("Customer group saved.")
+                    _safe_rerun()
         if selected_group:
             delete_confirm = st.checkbox(
                 "I understand this group will be deleted.",
@@ -8434,6 +8453,59 @@ def customers_page(conn):
                 conn.commit()
                 st.warning("Customer group deleted.")
                 _safe_rerun()
+
+        st.markdown("#### Group overview")
+        if groups_df.empty:
+            st.caption("No customer groups yet.")
+        else:
+            overview_df = groups_df.copy()
+            overview_df["updated_at"] = pd.to_datetime(
+                overview_df["updated_at"], errors="coerce"
+            ).dt.strftime("%d-%m-%Y %H:%M").fillna("")
+            st.dataframe(
+                overview_df.rename(
+                    columns={
+                        "group_id": "Group ID",
+                        "name": "Group name",
+                        "member_count": "Members",
+                        "updated_at": "Last updated",
+                    }
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        if selected_group:
+            members_detail = df_query(
+                conn,
+                """
+                SELECT c.customer_id,
+                       COALESCE(c.name, c.company_name, '(unknown)') AS customer,
+                       c.phone,
+                       c.address
+                FROM customer_group_members m
+                LEFT JOIN customers c ON c.customer_id = m.customer_id
+                WHERE m.group_id=?
+                ORDER BY LOWER(customer) ASC
+                """,
+                (int(selected_group),),
+            )
+            st.markdown("#### Group members")
+            if members_detail.empty:
+                st.caption("No customers in this group yet.")
+            else:
+                st.dataframe(
+                    members_detail.rename(
+                        columns={
+                            "customer_id": "Customer ID",
+                            "customer": "Customer",
+                            "phone": "Phone",
+                            "address": "Address",
+                        }
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                )
 
     with st.expander("Add new customer"):
         products_state = st.session_state.get(
@@ -13947,35 +14019,72 @@ def delivery_orders_page(
                 return format_money(value) or f"{_coerce_float(value, 0.0):,.2f}"
 
             do_df["total_amount"] = do_df["total_amount"].apply(_format_total_value)
+        st.markdown(f"#### {record_label} records")
+        header_cols = st.columns((1.2, 1.4, 2.2, 1.0, 0.9, 1.1, 0.7, 0.7, 1.5))
+        header_cols[0].write(f"**{number_label}**")
+        header_cols[1].write("**Customer**")
+        header_cols[2].write("**Description**")
+        header_cols[3].write("**Total**")
+        header_cols[4].write("**Status**")
+        header_cols[5].write("**Created**")
+        header_cols[6].write("**Attachment**")
+        header_cols[7].write("**Receipt**")
+        header_cols[8].write("**Upload doc**")
 
-        st.dataframe(
-            do_df.rename(
-                columns={
-                    "do_number": number_label,
-                    "customer": "Customer",
-                    "description": "Description",
-                    "sales_person": "Sales person",
-                    "remarks": "Remarks",
-                    "created_at": "Created",
-                    "updated_at": "Updated",
-                    "Document": "Attachment",
-                    "Receipt": "Receipt",
-                    "total_amount": "Total",
-                    "created_by_name": "Created by",
-                    "status": "Status",
-                }
-            ).drop(
-                columns=[
-                    "customer_id",
-                    "file_path",
-                    "items_payload",
-                    "created_by",
-                    "payment_receipt_path",
-                ],
-                errors="ignore",
-            ),
-            use_container_width=True,
-        )
+        for _, row in do_df.iterrows():
+            do_number = clean_text(row.get("do_number"))
+            if not do_number:
+                continue
+            row_key = f"{record_type_key}_{do_number}"
+            with st.form(f"do_upload_row_{row_key}"):
+                row_cols = st.columns((1.2, 1.4, 2.2, 1.0, 0.9, 1.1, 0.7, 0.7, 1.5))
+                row_cols[0].write(do_number)
+                row_cols[1].write(clean_text(row.get("customer")) or "(unknown)")
+                row_cols[2].write(clean_text(row.get("description")) or "")
+                row_cols[3].write(clean_text(row.get("total_amount")) or "")
+                row_cols[4].write(clean_text(row.get("status")) or "")
+                row_cols[5].write(clean_text(row.get("created_at")) or "")
+                row_cols[6].write(clean_text(row.get("Document")) or "")
+                row_cols[7].write(clean_text(row.get("Receipt")) or "")
+                upload_doc = row_cols[8].file_uploader(
+                    "Upload document",
+                    type=["pdf"],
+                    label_visibility="collapsed",
+                    key=f"do_row_doc_upload_{row_key}",
+                )
+                save_doc = row_cols[8].form_submit_button("Save", type="secondary")
+                if save_doc:
+                    if upload_doc is None:
+                        st.warning("Select a PDF to upload.")
+                    else:
+                        stored_path = store_uploaded_pdf(
+                            upload_doc,
+                            DELIVERY_ORDER_DIR,
+                            filename=(
+                                f"{record_type_key}_{_sanitize_path_component(do_number)}.pdf"
+                            ),
+                        )
+                        conn.execute(
+                            """
+                            UPDATE delivery_orders
+                               SET file_path=?,
+                                   updated_at=datetime('now')
+                             WHERE do_number=?
+                               AND COALESCE(record_type, 'delivery_order') = ?
+                               AND deleted_at IS NULL
+                            """,
+                            (stored_path, do_number, record_type_key),
+                        )
+                        conn.commit()
+                        log_activity(
+                            conn,
+                            event_type=f"{record_type_key}_document_uploaded",
+                            description=f"{record_label} {do_number} document uploaded",
+                            entity_type=record_type_key,
+                            entity_id=None,
+                        )
+                        st.success("Document uploaded.")
+                        _safe_rerun()
 
     downloads = {}
     if not do_df.empty:
