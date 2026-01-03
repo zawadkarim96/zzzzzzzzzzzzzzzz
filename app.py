@@ -9642,6 +9642,7 @@ def customers_page(conn):
                         elif changes:
                             conn.commit()
                             st.warning("Some changes were saved, but please review the errors above.")
+    scope_clause, scope_params = customer_scope_filter("c")
     st.markdown("**Recently Added Customers**")
     recent_where = f"WHERE {scope_clause}" if scope_clause else ""
     recent_params = scope_params if scope_clause else ()
