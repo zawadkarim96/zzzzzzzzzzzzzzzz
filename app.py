@@ -810,6 +810,24 @@ CREATE TABLE IF NOT EXISTS customers (
     dup_flag INTEGER DEFAULT 0,
     FOREIGN KEY(created_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS customer_groups (
+    group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_by INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY(created_by) REFERENCES users(user_id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS customer_group_members (
+    group_id INTEGER NOT NULL,
+    customer_id INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, customer_id),
+    FOREIGN KEY(group_id) REFERENCES customer_groups(group_id) ON DELETE CASCADE,
+    FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_customer_groups_name ON customer_groups(name);
+CREATE INDEX IF NOT EXISTS idx_customer_group_members_customer ON customer_group_members(customer_id);
 CREATE TABLE IF NOT EXISTS products (
     product_id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
@@ -5962,13 +5980,13 @@ def dashboard(conn):
     with header_cols[1]:
         render_notification_bell(conn)
     quick_links = st.columns(3)
-    if quick_links[0].button("Work done", key="dashboard_work_done_link"):
-        st.session_state.page = "Work done"
-        st.session_state["nav_page"] = "Work done"
+    if quick_links[0].button("Operations", key="dashboard_operations_link"):
+        st.session_state.page = "Operations"
+        st.session_state["nav_page"] = "Operations"
         _safe_rerun()
-    if quick_links[1].button("Delivery orders", key="dashboard_delivery_orders_link"):
-        st.session_state.page = "Delivery Orders"
-        st.session_state["nav_page"] = "Delivery Orders"
+    if quick_links[1].button("Customers", key="dashboard_customers_link"):
+        st.session_state.page = "Customers"
+        st.session_state["nav_page"] = "Customers"
         _safe_rerun()
     if quick_links[2].button("Quotation", key="dashboard_create_quotation_link"):
         st.session_state.page = "Quotation"
@@ -6821,7 +6839,20 @@ def dashboard(conn):
         conn,
         dedent(
             f"""
-            SELECT quotation_id, reference, quote_date, total_amount, status
+            SELECT quotation_id,
+                   reference,
+                   quote_date,
+                   total_amount,
+                   status,
+                   COALESCE(
+                       NULLIF(TRIM(customer_company), ''),
+                       NULLIF(TRIM(customer_name), ''),
+                       '—'
+                   ) AS customer,
+                   COALESCE(
+                       NULLIF(TRIM(subject), ''),
+                       NULLIF(TRIM(remarks_internal), '')
+                   ) AS product_details
             FROM quotations
             {quote_clause}
             ORDER BY datetime(quote_date) DESC, quotation_id DESC
@@ -6841,6 +6872,12 @@ def dashboard(conn):
         metrics_cols[2].metric("Conversion rate", f"{conversion:.1f}%")
 
         quotes_df = fmt_dates(quotes_df, ["quote_date"])
+        quotes_df["customer"] = quotes_df["customer"].apply(
+            lambda value: clean_text(value) or "—"
+        )
+        quotes_df["product_details"] = quotes_df["product_details"].apply(
+            lambda value: clean_text(value) or "—"
+        )
         quotes_df["total_amount"] = quotes_df["total_amount"].apply(
             lambda value: format_money(value) or f"{_coerce_float(value, 0.0):,.2f}"
         )
@@ -6851,6 +6888,8 @@ def dashboard(conn):
                     "quote_date": "Date",
                     "total_amount": "Total (BDT)",
                     "status": "Status",
+                    "customer": "Customer",
+                    "product_details": "Product details",
                 }
             ),
             use_container_width=True,
@@ -7702,6 +7741,128 @@ def customers_page(conn):
             st.warning(message)
         else:
             st.write(message)
+
+    with st.expander("Customer groups"):
+        st.caption(
+            "Create named customer groups so staff can quickly find and manage related accounts."
+        )
+        customer_options, customer_labels, _, _ = fetch_customer_choices(conn)
+        customer_choices = [cid for cid in customer_options if cid is not None]
+        groups_df = df_query(
+            conn,
+            """
+            SELECT g.group_id,
+                   g.name,
+                   COUNT(m.customer_id) AS member_count
+            FROM customer_groups g
+            LEFT JOIN customer_group_members m ON m.group_id = g.group_id
+            GROUP BY g.group_id
+            ORDER BY LOWER(g.name) ASC
+            """,
+        )
+        group_options: list[Optional[int]] = [None]
+        group_labels: dict[Optional[int], str] = {None: "Create new group"}
+        group_name_lookup: dict[int, str] = {}
+        if not groups_df.empty:
+            for _, row in groups_df.iterrows():
+                group_id = int(row.get("group_id"))
+                group_name = clean_text(row.get("name")) or f"Group #{group_id}"
+                count = int(row.get("member_count") or 0)
+                group_options.append(group_id)
+                group_labels[group_id] = f"{group_name} ({count})"
+                group_name_lookup[group_id] = group_name
+        selected_group = st.selectbox(
+            "Select group",
+            options=group_options,
+            format_func=lambda gid: group_labels.get(gid, "Create new group"),
+            key="customer_group_selector",
+        )
+        member_ids: list[int] = []
+        if selected_group:
+            members_df = df_query(
+                conn,
+                "SELECT customer_id FROM customer_group_members WHERE group_id=?",
+                (int(selected_group),),
+            )
+            if not members_df.empty:
+                member_ids = [
+                    int(cid)
+                    for cid in members_df["customer_id"].dropna().astype(int).tolist()
+                ]
+        default_name = group_name_lookup.get(int(selected_group)) if selected_group else ""
+        with st.form("customer_group_form"):
+            group_name = st.text_input(
+                "Group name",
+                value=default_name,
+                help="Use a clear name (e.g., Hospital clients, VIPs, Dhaka West).",
+            )
+            selected_members = st.multiselect(
+                "Customers in this group",
+                options=customer_choices,
+                default=member_ids,
+                format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
+            )
+            save_group = st.form_submit_button("Save group", type="primary")
+        if save_group:
+            group_name_clean = clean_text(group_name)
+            if not group_name_clean:
+                st.error("Group name is required.")
+            else:
+                cursor = conn.cursor()
+                if selected_group:
+                    cursor.execute(
+                        """
+                        UPDATE customer_groups
+                           SET name=?, updated_at=datetime('now')
+                         WHERE group_id=?
+                        """,
+                        (group_name_clean, int(selected_group)),
+                    )
+                    group_id = int(selected_group)
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO customer_groups (name, created_by, updated_at)
+                        VALUES (?, ?, datetime('now'))
+                        """,
+                        (group_name_clean, current_user_id()),
+                    )
+                    group_id = int(cursor.lastrowid)
+                cursor.execute(
+                    "DELETE FROM customer_group_members WHERE group_id=?",
+                    (group_id,),
+                )
+                for cid in selected_members:
+                    if cid is None:
+                        continue
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO customer_group_members (group_id, customer_id)
+                        VALUES (?, ?)
+                        """,
+                        (group_id, int(cid)),
+                    )
+                conn.commit()
+                st.success("Customer group saved.")
+                _safe_rerun()
+        if selected_group:
+            delete_confirm = st.checkbox(
+                "I understand this group will be deleted.",
+                key="customer_group_delete_confirm",
+            )
+            if st.button(
+                "Delete group",
+                type="secondary",
+                disabled=not delete_confirm,
+                key="customer_group_delete_button",
+            ):
+                conn.execute(
+                    "DELETE FROM customer_groups WHERE group_id=?",
+                    (int(selected_group),),
+                )
+                conn.commit()
+                st.warning("Customer group deleted.")
+                _safe_rerun()
 
     with st.expander("Add new customer"):
         products_state = st.session_state.get(
@@ -12995,6 +13156,18 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         st.info("No maintenance records yet. Log one using the form above.")
 
 
+def _reset_delivery_order_form_state() -> None:
+    st.session_state["delivery_order_items_rows"] = _default_delivery_items()
+    st.session_state["delivery_order_number"] = ""
+    st.session_state["delivery_order_customer"] = None
+    st.session_state["delivery_order_description"] = ""
+    st.session_state["delivery_order_sales_person"] = ""
+    st.session_state["delivery_order_remarks"] = ""
+    st.session_state["delivery_order_status"] = "pending"
+    for key in ("do_form_loader", "delivery_order_items_editor"):
+        st.session_state.pop(key, None)
+
+
 def delivery_orders_page(
     conn,
     *,
@@ -13599,6 +13772,44 @@ def delivery_orders_page(
         )
         st.warning(f"{record_label} deleted.")
         _safe_rerun()
+
+
+def operations_page(conn):
+    st.subheader("🧰 Operations")
+    st.caption(
+        "Delivery orders, work done, service, and maintenance share one workspace. "
+        "Choose the record type to manage."
+    )
+    record_options = {
+        "Delivery orders": ("Delivery order", "delivery_order"),
+        "Work done": ("Work done", "work_done"),
+        "Service": None,
+        "Maintenance": None,
+    }
+    selection = st.selectbox(
+        "Record type",
+        list(record_options.keys()),
+        key="operations_record_type",
+    )
+    previous_selection = st.session_state.get("operations_record_type_prev")
+    if previous_selection and previous_selection != selection:
+        _reset_delivery_order_form_state()
+    st.session_state["operations_record_type_prev"] = selection
+
+    if selection in ("Delivery orders", "Work done"):
+        record_label, record_key = record_options[selection]
+        delivery_orders_page(
+            conn,
+            show_heading=False,
+            record_type_label=record_label,
+            record_type_key=record_key,
+        )
+    elif selection == "Service":
+        st.markdown("### Service records")
+        _render_service_section(conn, show_heading=False)
+    elif selection == "Maintenance":
+        st.markdown("### Maintenance records")
+        _render_maintenance_section(conn, show_heading=False)
 
 
 def quotation_page(conn, *, render_id: Optional[int] = None):
@@ -14319,6 +14530,16 @@ def customer_summary_page(conn):
             mime="application/zip",
             key="cust_full_package",
         )
+
+
+def customers_hub_page(conn):
+    tabs = st.tabs(["Customers", "Customer Summary", "Import"])
+    with tabs[0]:
+        customers_page(conn)
+    with tabs[1]:
+        customer_summary_page(conn)
+    with tabs[2]:
+        import_page(conn)
 
 
 def scraps_page(conn):
@@ -17149,31 +17370,23 @@ def main():
             pages = [
                 "Dashboard",
                 "Customers",
-                "Work done",
-                "Delivery Orders",
+                "Operations",
                 "Quotation",
-                "Customer Summary",
                 "Scraps",
                 "Warranties",
-                "Import",
                 "Advanced Search",
                 "Reports",
                 "Duplicates",
                 "Users (Admin)",
-                "Maintenance and Service",
             ]
         else:
             pages = [
                 "Dashboard",
                 "Customers",
-                "Work done",
-                "Delivery Orders",
+                "Operations",
                 "Quotation",
-                "Customer Summary",
                 "Warranties",
-                "Import",
                 "Reports",
-                "Maintenance and Service",
             ]
 
         if "nav_page" not in st.session_state:
@@ -17204,22 +17417,16 @@ def main():
 
     if page == "Dashboard":
         dashboard(conn)
-    elif page == "Work done":
-        work_done_page(conn)
-    elif page == "Delivery Orders":
-        delivery_orders_page(conn)
+    elif page == "Operations":
+        operations_page(conn)
     elif page == "Quotation":
         quotation_page(conn, render_id=render_id)
     elif page == "Customers":
-        customers_page(conn)
-    elif page == "Customer Summary":
-        customer_summary_page(conn)
+        customers_hub_page(conn)
     elif page == "Scraps":
         scraps_page(conn)
     elif page == "Warranties":
         warranties_page(conn)
-    elif page == "Import":
-        import_page(conn)
     elif page == "Advanced Search":
         advanced_search_page(conn)
     elif page == "Reports":
@@ -17228,8 +17435,6 @@ def main():
         duplicates_page(conn)
     elif page == "Users (Admin)":
         users_admin_page(conn)
-    elif page == "Maintenance and Service":
-        service_maintenance_page(conn)
 
 if __name__ == "__main__":
     if _streamlit_runtime_active():
