@@ -7920,39 +7920,243 @@ def render_customer_quick_edit_section(
         if col in editor_df.columns
     ]
     editor_df = editor_df[column_order]
-    editor_state = st.data_editor(
-        editor_df,
-        hide_index=True,
-        num_rows="fixed",
-        use_container_width=True,
-        key=f"{key_prefix}_quick_edit_editor",
-        column_config={
-            "id": st.column_config.Column("ID", disabled=True),
-            "name": st.column_config.TextColumn("Name"),
-            "company_name": st.column_config.TextColumn(
-                "Company",
-                help="Optional organisation linked to the customer.",
-            ),
-            "phone": st.column_config.TextColumn("Phone"),
-            "address": st.column_config.TextColumn("Billing address"),
-            "delivery_address": st.column_config.TextColumn("Delivery address"),
-            "remarks": st.column_config.TextColumn("Remarks"),
-            "purchase_date": st.column_config.DateColumn(
-                "Purchase date", format="DD-MM-YYYY", required=False
-            ),
-            "product_info": st.column_config.TextColumn("Product"),
-            "delivery_order_code": st.column_config.TextColumn("DO code"),
-            "sales_person": st.column_config.TextColumn("Sales person"),
-            "duplicate": st.column_config.Column("Duplicate", disabled=True),
-            "created_at": st.column_config.DatetimeColumn(
-                "Created", format="DD-MM-YYYY HH:mm", disabled=True
-            ),
-            "uploaded_by": st.column_config.Column("Uploaded by", disabled=True),
-            "Action": st.column_config.SelectboxColumn(
-                "Action", options=["Keep", "Delete"], required=True
-            ),
-        },
+    doc_type_options = [
+        "Delivery order",
+        "Work done",
+        "Quotation",
+        "Service",
+        "Maintenance",
+        "Other",
+    ]
+    header_cols = st.columns(
+        (
+            0.5,
+            1.2,
+            1.2,
+            1.0,
+            1.4,
+            1.4,
+            1.2,
+            1.0,
+            1.6,
+            1.0,
+            1.0,
+            0.9,
+            1.0,
+            1.2,
+            1.2,
+            1.1,
+            1.0,
+        )
     )
+    header_cols[0].write("**ID**")
+    header_cols[1].write("**Name**")
+    header_cols[2].write("**Company**")
+    header_cols[3].write("**Phone**")
+    header_cols[4].write("**Billing address**")
+    header_cols[5].write("**Delivery address**")
+    header_cols[6].write("**Remarks**")
+    header_cols[7].write("**Purchase date**")
+    header_cols[8].write("**Product**")
+    header_cols[9].write("**DO code**")
+    header_cols[10].write("**Sales person**")
+    header_cols[11].write("**Duplicate**")
+    header_cols[12].write("**File type**")
+    header_cols[13].write("**➕ Upload**")
+    header_cols[14].write("**Created**")
+    header_cols[15].write("**Uploaded by**")
+    header_cols[16].write("**Action**")
+    editor_rows: list[dict[str, object]] = []
+    for row in editor_df.to_dict("records"):
+        cid = int_or_none(row.get("id"))
+        if cid is None:
+            continue
+        row_cols = st.columns(
+            (
+                0.5,
+                1.2,
+                1.2,
+                1.0,
+                1.4,
+                1.4,
+                1.2,
+                1.0,
+                1.6,
+                1.0,
+                1.0,
+                0.9,
+                1.0,
+                1.2,
+                1.2,
+                1.1,
+                1.0,
+            )
+        )
+        row_cols[0].write(cid)
+        name_key = f"{key_prefix}_quick_name_{cid}"
+        company_key = f"{key_prefix}_quick_company_{cid}"
+        phone_key = f"{key_prefix}_quick_phone_{cid}"
+        address_key = f"{key_prefix}_quick_address_{cid}"
+        delivery_key = f"{key_prefix}_quick_delivery_{cid}"
+        remarks_key = f"{key_prefix}_quick_remarks_{cid}"
+        purchase_key = f"{key_prefix}_quick_purchase_{cid}"
+        product_key = f"{key_prefix}_quick_product_{cid}"
+        do_key = f"{key_prefix}_quick_do_{cid}"
+        sales_key = f"{key_prefix}_quick_sales_{cid}"
+        file_type_key = f"{key_prefix}_quick_file_type_{cid}"
+        upload_key = f"{key_prefix}_quick_upload_{cid}"
+        upload_btn_key = f"{key_prefix}_quick_upload_btn_{cid}"
+        action_key = f"{key_prefix}_quick_action_{cid}"
+        created_at = row.get("created_at")
+        created_label = ""
+        if isinstance(created_at, (datetime, pd.Timestamp)) and not pd.isna(created_at):
+            created_label = created_at.strftime("%d-%m-%Y %H:%M")
+        purchase_date_value = row.get("purchase_date")
+        purchase_date_label = ""
+        if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
+            purchase_date_label = purchase_date_value.strftime(DATE_FMT)
+        row_cols[1].text_input(
+            "Name",
+            value=clean_text(row.get("name")) or "",
+            key=name_key,
+            label_visibility="collapsed",
+        )
+        row_cols[2].text_input(
+            "Company",
+            value=clean_text(row.get("company_name")) or "",
+            key=company_key,
+            label_visibility="collapsed",
+        )
+        row_cols[3].text_input(
+            "Phone",
+            value=clean_text(row.get("phone")) or "",
+            key=phone_key,
+            label_visibility="collapsed",
+        )
+        row_cols[4].text_input(
+            "Billing address",
+            value=clean_text(row.get("address")) or "",
+            key=address_key,
+            label_visibility="collapsed",
+        )
+        row_cols[5].text_input(
+            "Delivery address",
+            value=clean_text(row.get("delivery_address")) or "",
+            key=delivery_key,
+            label_visibility="collapsed",
+        )
+        row_cols[6].text_input(
+            "Remarks",
+            value=clean_text(row.get("remarks")) or "",
+            key=remarks_key,
+            label_visibility="collapsed",
+        )
+        row_cols[7].text_input(
+            "Purchase date",
+            value=purchase_date_label,
+            key=purchase_key,
+            label_visibility="collapsed",
+        )
+        row_cols[8].text_input(
+            "Product",
+            value=clean_text(row.get("product_info")) or "",
+            key=product_key,
+            label_visibility="collapsed",
+        )
+        row_cols[9].text_input(
+            "DO code",
+            value=clean_text(row.get("delivery_order_code")) or "",
+            key=do_key,
+            label_visibility="collapsed",
+        )
+        row_cols[10].text_input(
+            "Sales person",
+            value=clean_text(row.get("sales_person")) or "",
+            key=sales_key,
+            label_visibility="collapsed",
+        )
+        row_cols[11].write(clean_text(row.get("duplicate")) or "")
+        row_cols[12].selectbox(
+            "File type",
+            options=doc_type_options,
+            key=file_type_key,
+            label_visibility="collapsed",
+        )
+        upload_file = row_cols[13].file_uploader(
+            "Upload document",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=upload_key,
+            label_visibility="collapsed",
+        )
+        if row_cols[13].button("➕", key=upload_btn_key, help="Upload document"):
+            if upload_file is None:
+                st.warning("Select a file to upload.")
+            else:
+                doc_type = st.session_state.get(file_type_key) or "Other"
+                doc_type_slug = (
+                    _sanitize_path_component(doc_type.lower().replace(" ", "_"))
+                    or "document"
+                )
+                target_dir = CUSTOMER_DOCS_DIR / doc_type_slug
+                target_dir.mkdir(parents=True, exist_ok=True)
+                original_name = upload_file.name or f"{doc_type_slug}_{cid}.pdf"
+                safe_original = Path(original_name).name
+                filename = f"{doc_type_slug}_{cid}_{safe_original}"
+                saved_path = save_uploaded_file(
+                    upload_file,
+                    target_dir,
+                    filename=filename,
+                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                    default_extension=".pdf",
+                )
+                if saved_path:
+                    try:
+                        stored_path = str(saved_path.relative_to(BASE_DIR))
+                    except ValueError:
+                        stored_path = str(saved_path)
+                    conn.execute(
+                        """
+                        INSERT INTO customer_documents (
+                            customer_id, doc_type, file_path, original_name, uploaded_by
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            cid,
+                            doc_type,
+                            stored_path,
+                            safe_original,
+                            current_user_id(),
+                        ),
+                    )
+                    conn.commit()
+                    st.success("Document uploaded.")
+                    _safe_rerun()
+                else:
+                    st.error("Unable to save the uploaded file.")
+        row_cols[14].write(created_label or "-")
+        row_cols[15].write(clean_text(row.get("uploaded_by")) or "-")
+        row_cols[16].selectbox(
+            "Action",
+            options=["Keep", "Delete"],
+            key=action_key,
+            label_visibility="collapsed",
+        )
+        editor_rows.append(
+            {
+                "id": cid,
+                "name": st.session_state.get(name_key),
+                "company_name": st.session_state.get(company_key),
+                "phone": st.session_state.get(phone_key),
+                "address": st.session_state.get(address_key),
+                "delivery_address": st.session_state.get(delivery_key),
+                "remarks": st.session_state.get(remarks_key),
+                "purchase_date": st.session_state.get(purchase_key),
+                "product_info": st.session_state.get(product_key),
+                "delivery_order_code": st.session_state.get(do_key),
+                "sales_person": st.session_state.get(sales_key),
+                "Action": st.session_state.get(action_key),
+            }
+        )
     if not is_admin:
         st.caption(
             "Set Action to “Delete” requires admin access; non-admin changes will be ignored."
@@ -8005,9 +8209,7 @@ def render_customer_quick_edit_section(
         type="primary",
         key=f"{key_prefix}_apply_updates",
     ):
-        editor_result = (
-            editor_state if isinstance(editor_state, pd.DataFrame) else pd.DataFrame(editor_state)
-        )
+        editor_result = pd.DataFrame(editor_rows)
         if editor_result.empty:
             st.info("No rows to update.")
         else:
@@ -14181,7 +14383,6 @@ def operations_page(conn):
     render_customer_quick_edit_section(
         conn, key_prefix="operations_customers", include_leads=False
     )
-    render_customer_document_uploader(conn, key_prefix="operations_customer_docs")
     st.markdown("---")
     record_options = {
         "Delivery orders": ("Delivery order", "delivery_order"),
