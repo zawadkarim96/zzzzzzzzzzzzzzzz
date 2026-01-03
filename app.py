@@ -3365,13 +3365,13 @@ def save_uploaded_file(
     stem = Path(raw_name).stem or "upload"
     ext = Path(raw_name).suffix.lower()
 
-    if allowed_extensions:
+    if allowed_extensions is not None:
         normalized_allowed = {val.lower() for val in allowed_extensions}
         if ext not in normalized_allowed:
             ext = default_extension if default_extension.startswith(".") else f".{default_extension}"
         safe_name = f"{stem}{ext}"
     else:
-        if ext != ".pdf":
+        if not ext:
             ext = default_extension if default_extension.startswith(".") else f".{default_extension}"
         safe_name = f"{stem}{ext}"
     dest = target_dir / safe_name
@@ -7765,18 +7765,25 @@ def render_customer_quick_edit_section(
     *,
     key_prefix: str,
     include_leads: bool = True,
+    show_heading: bool = True,
+    show_editor: bool = True,
+    show_filters: bool = True,
 ) -> pd.DataFrame:
-    sort_dir = st.radio(
-        "Sort by created date",
-        ["Newest first", "Oldest first"],
-        horizontal=True,
-        key=f"{key_prefix}_sort_dir",
-    )
-    order = "DESC" if sort_dir == "Newest first" else "ASC"
-    q = st.text_input(
-        "Search (name/phone/address/product/DO)",
-        key=f"{key_prefix}_search",
-    )
+    if show_filters:
+        sort_dir = st.radio(
+            "Sort by created date",
+            ["Newest first", "Oldest first"],
+            horizontal=True,
+            key=f"{key_prefix}_sort_dir",
+        )
+        order = "DESC" if sort_dir == "Newest first" else "ASC"
+        q = st.text_input(
+            "Search (name/phone/address/product/DO)",
+            key=f"{key_prefix}_search",
+        )
+    else:
+        order = "DESC"
+        q = ""
     scope_clause, scope_params = customer_scope_filter("c")
     search_clause = dedent(
         """
@@ -7867,9 +7874,13 @@ def render_customer_quick_edit_section(
                 "uploaded_by": st.column_config.Column("Uploaded by"),
             },
         )
-    st.markdown("### Quick edit or delete")
+    if show_heading and show_editor:
+        st.markdown("### Quick edit or delete")
     if df_raw.empty:
-        st.info("No customers found for the current filters.")
+        if show_editor:
+            st.info("No customers found for the current filters.")
+        return df_raw
+    if not show_editor:
         return df_raw
 
     original_map: dict[int, dict] = {}
@@ -8201,10 +8212,11 @@ def render_customer_document_uploader(
             key=f"{key_prefix}_doc_type",
         )
         upload_files = st.file_uploader(
-            "Upload PDFs or images",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            "Upload documents",
+            type=None,
             accept_multiple_files=True,
             key=f"{key_prefix}_files",
+            help="Upload PDFs, images, or any other supporting documents.",
         )
         if st.button("Save documents", key=f"{key_prefix}_save"):
             if not upload_files:
@@ -9303,7 +9315,12 @@ def customers_page(conn):
                 _safe_rerun()
                 return
     df_raw = render_customer_quick_edit_section(
-        conn, key_prefix="customers", include_leads=True
+        conn,
+        key_prefix="customers",
+        include_leads=True,
+        show_heading=False,
+        show_editor=False,
+        show_filters=False,
     )
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
@@ -9642,6 +9659,8 @@ def customers_page(conn):
                         elif changes:
                             conn.commit()
                             st.warning("Some changes were saved, but please review the errors above.")
+    st.markdown("---")
+    render_customer_document_uploader(conn, key_prefix="customers_docs")
     scope_clause, scope_params = customer_scope_filter("c")
     st.markdown("**Recently Added Customers**")
     recent_where = f"WHERE {scope_clause}" if scope_clause else ""
@@ -12063,6 +12082,46 @@ def _render_quotation_management(conn):
         st.info("No quotations recorded yet. Create a quotation above to start tracking.")
         return
 
+    def _extract_product_summary(items_payload: object) -> str:
+        if items_payload in (None, "", "nan", "NaT"):
+            return ""
+        payload_text = items_payload
+        if not isinstance(payload_text, str):
+            try:
+                payload_text = json.dumps(payload_text)
+            except (TypeError, ValueError):
+                return ""
+        try:
+            items = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(items, list):
+            return ""
+        names: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            description = clean_text(
+                item.get("Description of Generator")
+                or item.get("Description")
+                or item.get("Product")
+                or item.get("Item")
+                or item.get("Name")
+            )
+            if description:
+                names.append(description)
+        if not names:
+            return ""
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for name in names:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(name)
+        return ", ".join(deduped)
+
     def _as_editable_date(value: object) -> Optional[date]:
         if value in (None, "", "nan", "NaT"):
             return None
@@ -12089,12 +12148,21 @@ def _render_quotation_management(conn):
     quotes_df["follow_up_date"] = quotes_df.get("follow_up_date", pd.Series(dtype=object)).apply(
         _as_editable_date
     )
+    quotes_df["products"] = quotes_df.get("items_payload", pd.Series(dtype=object)).apply(
+        _extract_product_summary
+    )
     quotes_df = fmt_dates(quotes_df, ["quote_date"])
     quotes_df["total_amount"] = quotes_df["total_amount"].apply(
         lambda value: format_money(value) or f"{_coerce_float(value, 0.0):,.2f}"
     )
 
     tracker_source = quotes_df.drop(columns=["items_payload"], errors="ignore")
+    if "products" in tracker_source.columns and "customer_company" in tracker_source.columns:
+        columns = list(tracker_source.columns)
+        columns.remove("products")
+        insert_at = columns.index("customer_company") + 1
+        columns.insert(insert_at, "products")
+        tracker_source = tracker_source[columns]
     closed_statuses = {"paid", "rejected"}
     locked_mask = tracker_source["status"].str.lower().isin(closed_statuses)
     editable_df = tracker_source[~locked_mask].copy()
@@ -12143,6 +12211,7 @@ def _render_quotation_management(conn):
         "reminder_label": st.column_config.TextColumn("Reminder"),
         "reference": st.column_config.TextColumn("Reference"),
         "customer_company": st.column_config.TextColumn("Customer"),
+        "products": st.column_config.TextColumn("Products", disabled=True),
         "customer_name": st.column_config.TextColumn("Contact name"),
         "customer_contact": st.column_config.TextColumn("Contact"),
         "total_amount": st.column_config.TextColumn("Total amount (BDT)"),
