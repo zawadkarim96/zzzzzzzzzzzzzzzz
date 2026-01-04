@@ -2397,6 +2397,38 @@ def apply_theme_styles() -> None:
         [data-testid="stSidebar"] {{
             background-color: {sidebar_bg};
         }}
+        .ps-ribbon-nav {{
+            position: sticky;
+            top: 1rem;
+            background: {sidebar_bg};
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            border-radius: 18px;
+            padding: 1rem 0.85rem;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+        }}
+        .ps-ribbon-nav h3 {{
+            margin-top: 0;
+        }}
+        .ps-ribbon-nav [role="radiogroup"] {{
+            gap: 0.35rem;
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label {{
+            border-radius: 999px;
+            padding: 0.35rem 0.75rem;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label:hover {{
+            background: rgba(15, 23, 42, 0.06);
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label[data-selected="true"] {{
+            border-color: rgba(15, 23, 42, 0.16);
+            background: #ffffff;
+            font-weight: 600;
+        }}
+        .ps-ribbon-nav .stButton > button {{
+            border-radius: 999px;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -2435,7 +2467,7 @@ def _theme_controls() -> None:
             _render_controls()
 
 
-def sidebar(user: Dict) -> str:
+def _navigation_pages(user: Dict) -> dict[str, str]:
     pages_common = {
         "Dashboard": "dashboard",
         "Work Orders": "work_orders",
@@ -2448,35 +2480,38 @@ def sidebar(user: Dict) -> str:
         "Users": "users",
     }
     if user["role"] == "admin":
-        pages = {**pages_common, **pages_admin}
-    else:
-        pages = pages_common
+        return {**pages_common, **pages_admin}
+    return pages_common
 
-    st.sidebar.title("Navigation")
-    st.session_state.setdefault("active_page", "dashboard")
 
+def _sync_sales_nav(key: str, pages: dict[str, str]) -> None:
     labels = list(pages.keys())
-    st.session_state.setdefault("navigation_choice", labels[0])
+    choice = st.session_state.get(key, labels[0])
+    if choice not in pages:
+        choice = labels[0]
+    st.session_state["active_page"] = pages[choice]
+    st.session_state["navigation_choice"] = choice
 
-    def _set_page_from_radio() -> None:
-        choice = st.session_state.get("navigation_choice", labels[0])
-        st.session_state["active_page"] = pages[choice]
 
+def sidebar(user: Dict, pages: dict[str, str]) -> None:
+    labels = list(pages.keys())
+    st.sidebar.title("Navigation")
     if st.sidebar.button("Create quotation", use_container_width=True):
         st.session_state["active_page"] = "quotation_letters"
 
-    current_page = st.session_state.get("active_page", "dashboard")
-    if current_page != "quotation_letters":
+    current_label = st.session_state.get("navigation_choice", labels[0])
+    if st.session_state.get("active_page") != "quotation_letters":
         for label, slug in pages.items():
-            if slug == current_page:
-                st.session_state["navigation_choice"] = label
+            if slug == st.session_state.get("active_page"):
+                current_label = label
                 break
+    st.session_state["navigation_choice_sidebar"] = current_label
 
     st.sidebar.radio(
         "Go to",
         labels,
-        key="navigation_choice",
-        on_change=_set_page_from_radio,
+        key="navigation_choice_sidebar",
+        on_change=lambda: _sync_sales_nav("navigation_choice_sidebar", pages),
     )
     st.sidebar.write("---")
     st.sidebar.write(f"Logged in as **{user['username']}** ({user['role']})")
@@ -2484,7 +2519,32 @@ def sidebar(user: Dict) -> str:
     if st.sidebar.button("Logout"):
         st.session_state["logout_requested"] = True
         rerun()
-    return st.session_state.get("active_page", "dashboard")
+
+
+def ribbon_navigation(user: Dict, pages: dict[str, str]) -> None:
+    labels = list(pages.keys())
+    if st.button("Create quotation", use_container_width=True, key="ribbon_create_quote"):
+        st.session_state["active_page"] = "quotation_letters"
+
+    current_label = st.session_state.get("navigation_choice", labels[0])
+    if st.session_state.get("active_page") != "quotation_letters":
+        for label, slug in pages.items():
+            if slug == st.session_state.get("active_page"):
+                current_label = label
+                break
+    st.session_state["navigation_choice_ribbon"] = current_label
+
+    st.radio(
+        "Go to",
+        labels,
+        key="navigation_choice_ribbon",
+        on_change=lambda: _sync_sales_nav("navigation_choice_ribbon", pages),
+    )
+    st.write("---")
+    st.write(f"Logged in as **{user['username']}** ({user['role']})")
+    if st.button("Logout", key="ribbon_logout"):
+        st.session_state["logout_requested"] = True
+        rerun()
 
 
 def show_pdf_link(relative_path: Optional[str], label: str) -> None:
@@ -5835,26 +5895,42 @@ def main() -> None:
     apply_theme_styles()
 
     user = st.session_state["user"]
-    page = sidebar(user)
+    pages = _navigation_pages(user)
+    labels = list(pages.keys())
+    st.session_state.setdefault("active_page", pages[labels[0]])
+    active_page = st.session_state.get("active_page", pages[labels[0]])
+    if active_page != "quotation_letters" and active_page not in pages.values():
+        st.session_state["active_page"] = pages[labels[0]]
 
-    if page == "dashboard":
-        render_dashboard(user)
-    elif page == "quotation_letters":
-        render_quotation_letter_page(user)
-    elif page == "quotations":
-        render_quotations(user)
-    elif page == "work_orders":
-        render_work_orders(user)
-    elif page == "delivery_orders":
-        render_delivery_orders(user)
-    elif page == "companies":
-        render_companies()
-    elif page == "admin_filters":
-        render_admin_filters()
-    elif page == "users":
-        render_users()
-    elif page == "notifications":
-        render_notifications(user)
+    sidebar(user, pages)
+
+    nav_col, content_col = st.columns([1, 5], gap="large")
+    with nav_col:
+        st.markdown('<div class="ps-ribbon-nav">', unsafe_allow_html=True)
+        st.markdown("### Navigation")
+        ribbon_navigation(user, pages)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    page = st.session_state.get("active_page", pages[labels[0]])
+    with content_col:
+        if page == "dashboard":
+            render_dashboard(user)
+        elif page == "quotation_letters":
+            render_quotation_letter_page(user)
+        elif page == "quotations":
+            render_quotations(user)
+        elif page == "work_orders":
+            render_work_orders(user)
+        elif page == "delivery_orders":
+            render_delivery_orders(user)
+        elif page == "companies":
+            render_companies()
+        elif page == "admin_filters":
+            render_admin_filters()
+        elif page == "users":
+            render_users()
+        elif page == "notifications":
+            render_notifications(user)
 
 
 if __name__ == "__main__":

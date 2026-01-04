@@ -4477,6 +4477,38 @@ def apply_theme_css() -> None:
         [data-testid="stSidebar"] {{
             background-color: var(--ps-sidebar-bg);
         }}
+        .ps-ribbon-nav {{
+            position: sticky;
+            top: 1rem;
+            background: var(--ps-sidebar-bg);
+            border: 1px solid var(--ps-panel-border);
+            border-radius: 18px;
+            padding: 1rem 0.85rem;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+        }}
+        .ps-ribbon-nav h3 {{
+            margin-top: 0;
+        }}
+        .ps-ribbon-nav [role="radiogroup"] {{
+            gap: 0.35rem;
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label {{
+            border-radius: 999px;
+            padding: 0.35rem 0.75rem;
+            border: 1px solid transparent;
+            transition: all 0.2s ease;
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label:hover {{
+            background: var(--ps-button-hover);
+        }}
+        .ps-ribbon-nav [data-testid="stRadio"] label[data-selected="true"] {{
+            border-color: var(--ps-button-border);
+            background: var(--ps-panel-bg);
+            font-weight: 600;
+        }}
+        .ps-ribbon-nav .stButton > button {{
+            border-radius: 999px;
+        }}
         [data-testid="stTextInput"] input,
         [data-testid="stTextArea"] textarea,
         [data-testid="stDateInput"] input,
@@ -18498,6 +18530,45 @@ def main():
 
     user = st.session_state.user or {}
     role = user.get("role")
+    if role == "admin":
+        pages = [
+            "Dashboard",
+            "Customers",
+            "Operations",
+            "Quotation",
+            "Scraps",
+            "Warranties",
+            "Advanced Search",
+            "Reports",
+            "Duplicates",
+            "Users (Admin)",
+        ]
+    else:
+        pages = [
+            "Dashboard",
+            "Customers",
+            "Operations",
+            "Quotation",
+            "Warranties",
+            "Reports",
+        ]
+
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = st.session_state.get("page", pages[0])
+    if st.session_state.get("nav_page") not in pages:
+        st.session_state["nav_page"] = pages[0]
+    current_page = st.session_state.get("nav_page", pages[0])
+
+    def _sync_nav_choice(key: str) -> None:
+        selection = st.session_state.get(key, pages[0])
+        if selection not in pages:
+            selection = pages[0]
+        st.session_state["nav_page"] = selection
+        st.session_state["page"] = selection
+
+    st.session_state["nav_selection_sidebar"] = current_page
+    st.session_state["nav_selection_ribbon"] = current_page
+
     with st.sidebar:
         sidebar_dark = st.toggle(
             "Mode",
@@ -18508,75 +18579,60 @@ def main():
         set_theme(sidebar_dark)
         apply_theme_css()
         st.markdown("### Navigation")
-        if role == "admin":
-            pages = [
-                "Dashboard",
-                "Customers",
-                "Operations",
-                "Quotation",
-                "Scraps",
-                "Warranties",
-                "Advanced Search",
-                "Reports",
-                "Duplicates",
-                "Users (Admin)",
-            ]
-        else:
-            pages = [
-                "Dashboard",
-                "Customers",
-                "Operations",
-                "Quotation",
-                "Warranties",
-                "Reports",
-            ]
-
-        if "nav_page" not in st.session_state:
-            st.session_state["nav_page"] = st.session_state.get("page", pages[0])
-        if st.session_state.get("nav_page") not in pages:
-            st.session_state["nav_page"] = pages[0]
-
-        current_page = st.session_state.get("nav_page", pages[0])
-        if "nav_selection" not in st.session_state:
-            st.session_state["nav_selection"] = current_page
-        if st.session_state.get("nav_selection") not in pages:
-            st.session_state["nav_selection"] = current_page
-        page_choice = st.radio(
+        st.radio(
             "Navigate",
             pages,
             index=pages.index(current_page),
-            key="nav_selection",
+            key="nav_selection_sidebar",
+            on_change=lambda: _sync_nav_choice("nav_selection_sidebar"),
         )
-        st.session_state["nav_page"] = page_choice
-        page = page_choice
-        st.session_state.page = page
         st.divider()
         if st.button("Logout", key="sidebar_logout_main", use_container_width=True):
             _request_logout()
             st.rerun()
 
-    show_expiry_notifications(conn)
+    nav_col, content_col = st.columns([1, 5], gap="large")
+    with nav_col:
+        st.markdown('<div class="ps-ribbon-nav">', unsafe_allow_html=True)
+        st.markdown("### Navigation")
+        st.radio(
+            "Navigate",
+            pages,
+            index=pages.index(current_page),
+            key="nav_selection_ribbon",
+            on_change=lambda: _sync_nav_choice("nav_selection_ribbon"),
+        )
+        st.divider()
+        if st.button("Logout", key="ribbon_logout_main", use_container_width=True):
+            _request_logout()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if page == "Dashboard":
-        dashboard(conn)
-    elif page == "Operations":
-        operations_page(conn)
-    elif page == "Quotation":
-        quotation_page(conn, render_id=render_id)
-    elif page == "Customers":
-        customers_hub_page(conn)
-    elif page == "Scraps":
-        scraps_page(conn)
-    elif page == "Warranties":
-        warranties_page(conn)
-    elif page == "Advanced Search":
-        advanced_search_page(conn)
-    elif page == "Reports":
-        reports_page(conn)
-    elif page == "Duplicates":
-        duplicates_page(conn)
-    elif page == "Users (Admin)":
-        users_admin_page(conn)
+    page = st.session_state.get("nav_page", pages[0])
+    st.session_state.page = page
+    with content_col:
+        show_expiry_notifications(conn)
+
+        if page == "Dashboard":
+            dashboard(conn)
+        elif page == "Operations":
+            operations_page(conn)
+        elif page == "Quotation":
+            quotation_page(conn, render_id=render_id)
+        elif page == "Customers":
+            customers_hub_page(conn)
+        elif page == "Scraps":
+            scraps_page(conn)
+        elif page == "Warranties":
+            warranties_page(conn)
+        elif page == "Advanced Search":
+            advanced_search_page(conn)
+        elif page == "Reports":
+            reports_page(conn)
+        elif page == "Duplicates":
+            duplicates_page(conn)
+        elif page == "Users (Admin)":
+            users_admin_page(conn)
 
 if __name__ == "__main__":
     if _streamlit_runtime_active():
