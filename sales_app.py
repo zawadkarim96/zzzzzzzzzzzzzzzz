@@ -2405,6 +2405,7 @@ def apply_theme_styles() -> None:
             border-radius: 18px;
             padding: 1rem 0.85rem;
             box-shadow: 0 18px 40px rgba(15, 23, 42, 0.12);
+            display: none !important;
         }}
         .ps-ribbon-nav h3 {{
             margin-top: 0;
@@ -2428,6 +2429,14 @@ def apply_theme_styles() -> None:
         }}
         .ps-ribbon-nav .stButton > button {{
             border-radius: 999px;
+        }}
+        @media (max-width: 1200px) {{
+            .ps-ribbon-nav {{
+                display: block !important;
+            }}
+            [data-testid="stSidebar"] {{
+                display: none !important;
+            }}
         }}
         </style>
         """,
