@@ -18476,8 +18476,8 @@ def main():
         st.rerun()
     st.session_state["_render_id"] = st.session_state.get("_render_id", 0) + 1
     render_id = st.session_state["_render_id"]
-    apply_theme_css()
     init_ui()
+    apply_theme_css()
     _ensure_quotation_editor_server()
     conn = get_conn()
     init_schema(conn)
