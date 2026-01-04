@@ -3189,6 +3189,16 @@ def _default_delivery_items() -> list[dict[str, object]]:
     ]
 
 
+def _default_simple_items() -> list[dict[str, object]]:
+    return [
+        {
+            "description": "",
+            "quantity": 1.0,
+            "unit_price": 0.0,
+        }
+    ]
+
+
 def _products_to_delivery_items(products: Iterable[dict[str, object]]) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for entry in products or []:
@@ -3242,6 +3252,50 @@ def normalize_delivery_items(rows: Iterable[dict[str, object]]) -> tuple[list[di
             }
         )
     return normalized, total_amount
+
+
+def normalize_simple_items(rows: Iterable[dict[str, object]]) -> tuple[list[dict[str, object]], float]:
+    normalized: list[dict[str, object]] = []
+    total_amount = 0.0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        description = clean_text(row.get("description"))
+        if not description:
+            continue
+        quantity = max(_coerce_float(row.get("quantity"), 1.0), 0.0)
+        unit_price = max(_coerce_float(row.get("unit_price"), 0.0), 0.0)
+        line_total = quantity * unit_price
+        total_amount += line_total
+        normalized.append(
+            {
+                "description": description,
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "line_total": line_total,
+            }
+        )
+    return normalized, total_amount
+
+
+def format_simple_item_labels(items: Iterable[dict[str, object]]) -> list[str]:
+    labels: list[str] = []
+    for entry in items or []:
+        if not isinstance(entry, dict):
+            continue
+        description = clean_text(entry.get("description"))
+        if not description:
+            continue
+        quantity = _coerce_float(entry.get("quantity"), 1.0)
+        unit_price = _coerce_float(entry.get("unit_price"), 0.0)
+        label = description
+        if quantity:
+            qty_label = int(quantity) if math.isclose(quantity, round(quantity)) else quantity
+            label = f"{label} ×{qty_label}"
+        if unit_price:
+            label = f"{label} @ Tk {unit_price:,.2f}"
+        labels.append(label)
+    return labels
 
 
 def parse_delivery_items_payload(value: Optional[str]) -> list[dict[str, object]]:
@@ -8084,7 +8138,7 @@ def render_customer_quick_edit_section(
         base_widths.append(1.0)
     if show_duplicate:
         base_widths.append(0.9)
-    base_widths.extend([1.4, 1.0])
+    base_widths.extend([2.2, 1.0])
     widths = [0.5, *base_widths] if show_id else base_widths
     header_cols = st.columns(tuple(widths))
     header_idx = 0
@@ -8490,34 +8544,71 @@ def _render_doc_detail_inputs(
 ) -> dict[str, object]:
     defaults = defaults or {}
     details: dict[str, object] = {}
+    current_user = get_current_user() or {}
+    user_label = clean_text(current_user.get("username")) or ""
     if doc_type == "Quotation":
         details["reference"] = st.text_input(
             "Quotation reference",
             key=f"{key_prefix}_quotation_reference",
         )
+        items_key = f"{key_prefix}_quotation_items"
+        st.session_state.setdefault(items_key, _default_quotation_items())
+        items_df = pd.DataFrame(st.session_state.get(items_key, []))
+        for col in ["description", "quantity", "rate", "total_price"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total_price"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("rate"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        st.markdown("**Quotation items**")
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "rate", "total_price"]],
+            key=f"{items_key}_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn("Product"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "rate": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "total_price": st.column_config.NumberColumn(
+                    "Line total", format="%.2f", disabled=True
+                ),
+            },
+        )
+        items_records = (
+            edited_items.to_dict("records")
+            if isinstance(edited_items, pd.DataFrame)
+            else edited_items
+        )
+        details["items"] = items_records
+        st.session_state[items_key] = items_records
         details["quote_date"] = st.date_input(
             "Quotation date",
             value=date.today(),
             key=f"{key_prefix}_quotation_date",
             format="DD-MM-YYYY",
         )
-        details["total_amount"] = st.number_input(
-            "Quotation total amount (BDT)",
-            min_value=0.0,
-            step=1000.0,
-            format="%.2f",
-            key=f"{key_prefix}_quotation_total",
-        )
-        details["product_info"] = st.text_area(
-            "Product details",
-            value=clean_text(defaults.get("product_info")) or "",
-            key=f"{key_prefix}_quotation_products",
-        )
         details["payment_status"] = st.selectbox(
             "Payment status",
-            options=["due", "advanced", "paid"],
+            options=["pending", "paid", "rejected"],
             key=f"{key_prefix}_quotation_payment_status",
             format_func=lambda status: status.title(),
+        )
+        details["follow_up_notes"] = st.text_area(
+            "Follow-up note",
+            key=f"{key_prefix}_quotation_follow_up_notes",
+            help="Internal note to track the next action or update.",
+        )
+        details["person_in_charge"] = st.text_input(
+            "Person in charge (optional)",
+            value=user_label,
+            key=f"{key_prefix}_quotation_person_in_charge",
         )
         details["receipt_upload"] = None
         if details["payment_status"] == "paid":
@@ -8527,6 +8618,41 @@ def _render_doc_detail_inputs(
                 key=f"{key_prefix}_quotation_receipt",
             )
     elif doc_type in ("Delivery order", "Work done"):
+        items_key = f"{key_prefix}_delivery_items"
+        st.session_state.setdefault(items_key, _default_simple_items())
+        items_df = pd.DataFrame(st.session_state.get(items_key, []))
+        for col in ["description", "quantity", "unit_price", "total"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("unit_price"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        st.markdown("**Products**")
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "unit_price", "total"]],
+            key=f"{items_key}_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn("Product"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
+            },
+        )
+        items_records = (
+            edited_items.to_dict("records")
+            if isinstance(edited_items, pd.DataFrame)
+            else edited_items
+        )
+        details["items"] = items_records
+        st.session_state[items_key] = items_records
         label = "Delivery order number" if doc_type == "Delivery order" else "Work done number"
         details["do_number"] = st.text_input(
             label,
@@ -8538,10 +8664,10 @@ def _render_doc_detail_inputs(
             key=f"{key_prefix}_do_status",
             format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
         )
-        details["sales_person"] = st.text_input(
-            "Sales person",
-            value=clean_text(defaults.get("sales_person")) or "",
-            key=f"{key_prefix}_do_sales_person",
+        details["person_in_charge"] = st.text_input(
+            "Person in charge (optional)",
+            value=clean_text(defaults.get("sales_person")) or user_label,
+            key=f"{key_prefix}_do_person_in_charge",
         )
         details["description"] = st.text_area(
             "Description",
@@ -8551,14 +8677,66 @@ def _render_doc_detail_inputs(
             "Remarks",
             key=f"{key_prefix}_do_remarks",
         )
+        details["advance_receipt_upload"] = None
         details["receipt_upload"] = None
-        if details["status"] == "paid":
+        if details["status"] == "advanced":
             details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for paid)",
+                "Advance receipt (required for advanced)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_do_advance_receipt",
+            )
+        elif details["status"] == "paid":
+            details["advance_taken"] = st.checkbox(
+                "Advance payment was received",
+                key=f"{key_prefix}_do_advance_taken",
+            )
+            if details["advance_taken"]:
+                details["advance_receipt_upload"] = st.file_uploader(
+                    "Advance receipt (required)",
+                    type=["pdf", "png", "jpg", "jpeg", "webp"],
+                    key=f"{key_prefix}_do_advance_receipt_paid",
+                )
+            details["receipt_upload"] = st.file_uploader(
+                "Full payment receipt (required for paid)",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{key_prefix}_do_receipt",
             )
     elif doc_type == "Service":
+        items_key = f"{key_prefix}_service_items"
+        st.session_state.setdefault(items_key, _default_simple_items())
+        items_df = pd.DataFrame(st.session_state.get(items_key, []))
+        for col in ["description", "quantity", "unit_price", "total"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("unit_price"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        st.markdown("**Products**")
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "unit_price", "total"]],
+            key=f"{items_key}_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn("Product"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
+            },
+        )
+        items_records = (
+            edited_items.to_dict("records")
+            if isinstance(edited_items, pd.DataFrame)
+            else edited_items
+        )
+        details["items"] = items_records
+        st.session_state[items_key] = items_records
         details["service_date"] = st.date_input(
             "Service date",
             value=date.today(),
@@ -8573,23 +8751,59 @@ def _render_doc_detail_inputs(
             "Remarks",
             key=f"{key_prefix}_service_remarks",
         )
-        details["product_info"] = st.text_input(
-            "Products sold",
-            key=f"{key_prefix}_service_products",
-        )
         details["payment_status"] = st.selectbox(
             "Payment status",
-            ["pending", "paid"],
+            ["pending", "advanced", "paid"],
             key=f"{key_prefix}_service_payment_status",
         )
+        details["person_in_charge"] = st.text_input(
+            "Person in charge (optional)",
+            value=user_label,
+            key=f"{key_prefix}_service_person_in_charge",
+        )
         details["receipt_upload"] = None
-        if details["payment_status"] == "paid":
+        if details["payment_status"] in {"advanced", "paid"}:
             details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for paid)",
+                "Payment receipt (required for advance/paid)",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{key_prefix}_service_receipt",
             )
     elif doc_type == "Maintenance":
+        items_key = f"{key_prefix}_maintenance_items"
+        st.session_state.setdefault(items_key, _default_simple_items())
+        items_df = pd.DataFrame(st.session_state.get(items_key, []))
+        for col in ["description", "quantity", "unit_price", "total"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("unit_price"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        st.markdown("**Products**")
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "unit_price", "total"]],
+            key=f"{items_key}_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn("Product"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
+            },
+        )
+        items_records = (
+            edited_items.to_dict("records")
+            if isinstance(edited_items, pd.DataFrame)
+            else edited_items
+        )
+        details["items"] = items_records
+        st.session_state[items_key] = items_records
         details["maintenance_date"] = st.date_input(
             "Maintenance date",
             value=date.today(),
@@ -8604,19 +8818,20 @@ def _render_doc_detail_inputs(
             "Remarks",
             key=f"{key_prefix}_maintenance_remarks",
         )
-        details["product_info"] = st.text_input(
-            "Products sold",
-            key=f"{key_prefix}_maintenance_products",
-        )
         details["payment_status"] = st.selectbox(
             "Payment status",
-            ["pending", "paid"],
+            ["pending", "advanced", "paid"],
             key=f"{key_prefix}_maintenance_payment_status",
         )
+        details["person_in_charge"] = st.text_input(
+            "Person in charge (optional)",
+            value=user_label,
+            key=f"{key_prefix}_maintenance_person_in_charge",
+        )
         details["receipt_upload"] = None
-        if details["payment_status"] == "paid":
+        if details["payment_status"] in {"advanced", "paid"}:
             details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for paid)",
+                "Payment receipt (required for advance/paid)",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{key_prefix}_maintenance_receipt",
             )
@@ -8632,28 +8847,68 @@ def _save_customer_document_upload(
     upload_file,
     details: dict[str, object],
 ) -> bool:
+    current_user = get_current_user() or {}
+    user_label = clean_text(current_user.get("username")) or ""
     if doc_type in ("Delivery order", "Work done"):
         do_number = clean_text(details.get("do_number"))
         if not do_number:
             st.error("Provide a delivery/work done number before saving.")
             return False
         status_value = normalize_delivery_status(details.get("status"))
-        if status_value == "paid" and details.get("receipt_upload") is None:
-            st.error("Upload a receipt before marking this as paid.")
+        if status_value == "advanced" and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as advanced.")
             return False
+        if status_value == "paid":
+            if details.get("receipt_upload") is None:
+                st.error("Upload the full payment receipt before marking this as paid.")
+                return False
+            if details.get("advance_taken") and details.get("advance_receipt_upload") is None:
+                st.error("Upload the advance receipt before saving this paid record.")
+                return False
     if doc_type == "Quotation":
-        status_value = clean_text(details.get("payment_status")) or "due"
+        status_value = clean_text(details.get("payment_status")) or "pending"
+        if not clean_text(details.get("reference")):
+            st.error("Quotation reference is required.")
+            return False
+        if not clean_text(details.get("follow_up_notes")):
+            st.error("Follow-up note is required for quotations.")
+            return False
+        items_input = details.get("items") or []
+        items_clean, totals_data = normalize_quotation_items(items_input)
+        if not items_clean:
+            st.error("Add at least one quotation item before saving.")
+            return False
         if status_value == "paid" and details.get("receipt_upload") is None:
             st.error("Upload a receipt before marking this quotation as paid.")
             return False
+        details["items"] = items_clean
+        details["total_amount"] = totals_data["grand_total"]
     if doc_type == "Service":
-        if details.get("payment_status") == "paid" and details.get("receipt_upload") is None:
-            st.error("Upload a receipt before marking this as paid.")
+        if not clean_text(details.get("description")):
+            st.error("Service description is required.")
             return False
+        items_input = details.get("items") or []
+        items_clean, _ = normalize_simple_items(items_input)
+        if not items_clean:
+            st.error("Add at least one service product item before saving.")
+            return False
+        if details.get("payment_status") in {"advanced", "paid"} and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as advanced or paid.")
+            return False
+        details["items"] = items_clean
     if doc_type == "Maintenance":
-        if details.get("payment_status") == "paid" and details.get("receipt_upload") is None:
-            st.error("Upload a receipt before marking this as paid.")
+        if not clean_text(details.get("description")):
+            st.error("Maintenance description is required.")
             return False
+        items_input = details.get("items") or []
+        items_clean, _ = normalize_simple_items(items_input)
+        if not items_clean:
+            st.error("Add at least one maintenance product item before saving.")
+            return False
+        if details.get("payment_status") in {"advanced", "paid"} and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as advanced or paid.")
+            return False
+        details["items"] = items_clean
 
     doc_dir_map = {
         "Delivery order": DELIVERY_ORDER_DIR,
@@ -8699,6 +8954,7 @@ def _save_customer_document_upload(
         ),
     )
 
+    new_product_labels: list[str] = []
     if doc_type == "Quotation":
         receipt_path = None
         receipt_upload = details.get("receipt_upload")
@@ -8711,10 +8967,10 @@ def _save_customer_document_upload(
                 identifier=f"{safe_ref}_receipt",
                 target_dir=QUOTATION_RECEIPT_DIR,
             )
-        product_info = clean_text(details.get("product_info"))
         items_payload = None
-        if product_info:
-            items_payload = json.dumps([{"Description": product_info}])
+        items_clean = details.get("items") or []
+        if items_clean:
+            items_payload = json.dumps(items_clean, ensure_ascii=False)
         payload = {
             "reference": clean_text(details.get("reference")),
             "quote_date": to_iso_date(details.get("quote_date")),
@@ -8723,8 +8979,11 @@ def _save_customer_document_upload(
             "customer_address": clean_text(customer_record.get("address")),
             "customer_contact": clean_text(customer_record.get("phone")),
             "total_amount": _coerce_float(details.get("total_amount"), 0.0),
-            "status": clean_text(details.get("payment_status")) or "due",
+            "status": clean_text(details.get("payment_status")) or "pending",
             "payment_receipt_path": receipt_path,
+            "follow_up_status": "Pending",
+            "follow_up_notes": clean_text(details.get("follow_up_notes")),
+            "salesperson_name": clean_text(details.get("person_in_charge")),
             "document_path": stored_path,
             "items_payload": items_payload,
             "created_by": uploader_id,
@@ -8740,18 +8999,45 @@ def _save_customer_document_upload(
                 receipt_upload,
                 identifier=f"{_sanitize_path_component(do_number)}_receipt",
             )
+        advance_receipt_upload = details.get("advance_receipt_upload")
+        if advance_receipt_upload is not None:
+            advance_path = store_payment_receipt(
+                advance_receipt_upload,
+                identifier=f"{_sanitize_path_component(do_number)}_advance_receipt",
+                target_dir=DELIVERY_RECEIPT_DIR,
+            )
+            if advance_path:
+                conn.execute(
+                    """
+                    INSERT INTO customer_documents (
+                        customer_id, doc_type, file_path, original_name, uploaded_by
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(customer_id),
+                        f"{doc_type} advance receipt",
+                        advance_path,
+                        Path(advance_receipt_upload.name).name,
+                        uploader_id,
+                    ),
+                )
+        items_clean, total_amount = normalize_simple_items(details.get("items") or [])
+        if items_clean:
+            new_product_labels = format_simple_item_labels(items_clean)
         conn.execute(
             """
             INSERT INTO delivery_orders (
                 do_number, customer_id, description, sales_person, remarks, file_path,
-                record_type, status, payment_receipt_path, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                items_payload, total_amount, record_type, status, payment_receipt_path, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(do_number) DO UPDATE SET
                 customer_id=excluded.customer_id,
                 description=excluded.description,
                 sales_person=excluded.sales_person,
                 remarks=excluded.remarks,
                 file_path=COALESCE(excluded.file_path, delivery_orders.file_path),
+                items_payload=COALESCE(excluded.items_payload, delivery_orders.items_payload),
+                total_amount=COALESCE(excluded.total_amount, delivery_orders.total_amount),
                 record_type=excluded.record_type,
                 status=excluded.status,
                 payment_receipt_path=COALESCE(excluded.payment_receipt_path, delivery_orders.payment_receipt_path),
@@ -8761,15 +9047,21 @@ def _save_customer_document_upload(
                 do_number,
                 int(customer_id),
                 clean_text(details.get("description")),
-                clean_text(details.get("sales_person")),
+                clean_text(details.get("person_in_charge")) or clean_text(user_label),
                 clean_text(details.get("remarks")),
                 stored_path,
+                json.dumps(items_clean, ensure_ascii=False) if items_clean else None,
+                total_amount if items_clean else None,
                 "work_done" if doc_type == "Work done" else "delivery_order",
                 status_value,
                 receipt_path,
             ),
         )
     elif doc_type == "Service":
+        items_clean, _ = normalize_simple_items(details.get("items") or [])
+        if items_clean:
+            new_product_labels = format_simple_item_labels(items_clean)
+        product_info = ", ".join(new_product_labels)
         receipt_path = None
         receipt_upload = details.get("receipt_upload")
         if receipt_upload is not None:
@@ -8777,6 +9069,10 @@ def _save_customer_document_upload(
                 receipt_upload,
                 identifier=f"{_sanitize_path_component(str(customer_id))}_service_receipt",
             )
+        remarks = clean_text(details.get("remarks"))
+        person_in_charge = clean_text(details.get("person_in_charge"))
+        if person_in_charge:
+            remarks = dedupe_join([remarks, f"Person in charge: {person_in_charge}"], " | ")
         cur = conn.execute(
             """
             INSERT INTO services (
@@ -8788,8 +9084,8 @@ def _save_customer_document_upload(
                 int(customer_id),
                 to_iso_date(details.get("service_date")),
                 clean_text(details.get("description")),
-                clean_text(details.get("remarks")),
-                clean_text(details.get("product_info")),
+                remarks,
+                product_info,
                 DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
@@ -8805,6 +9101,10 @@ def _save_customer_document_upload(
             (service_id, stored_path, safe_original),
         )
     elif doc_type == "Maintenance":
+        items_clean, _ = normalize_simple_items(details.get("items") or [])
+        if items_clean:
+            new_product_labels = format_simple_item_labels(items_clean)
+        product_info = ", ".join(new_product_labels)
         receipt_path = None
         receipt_upload = details.get("receipt_upload")
         if receipt_upload is not None:
@@ -8812,6 +9112,10 @@ def _save_customer_document_upload(
                 receipt_upload,
                 identifier=f"{_sanitize_path_component(str(customer_id))}_maintenance_receipt",
             )
+        remarks = clean_text(details.get("remarks"))
+        person_in_charge = clean_text(details.get("person_in_charge"))
+        if person_in_charge:
+            remarks = dedupe_join([remarks, f"Person in charge: {person_in_charge}"], " | ")
         cur = conn.execute(
             """
             INSERT INTO maintenance_records (
@@ -8823,8 +9127,8 @@ def _save_customer_document_upload(
                 int(customer_id),
                 to_iso_date(details.get("maintenance_date")),
                 clean_text(details.get("description")),
-                clean_text(details.get("remarks")),
-                clean_text(details.get("product_info")),
+                remarks,
+                product_info,
                 DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
@@ -8839,6 +9143,18 @@ def _save_customer_document_upload(
             """,
             (maintenance_id, stored_path, safe_original),
         )
+
+    if new_product_labels:
+        existing_products = clean_text(customer_record.get("product_info"))
+        merged_products = existing_products
+        for label in new_product_labels:
+            if label and label not in merged_products:
+                merged_products = dedupe_join([merged_products, label], " ; ")
+        if merged_products != existing_products:
+            conn.execute(
+                "UPDATE customers SET product_info=? WHERE customer_id=?",
+                (merged_products, int(customer_id)),
+            )
 
     conn.commit()
     return True
@@ -9215,6 +9531,11 @@ def customers_page(conn):
                 )
                 st.markdown("---")
                 create_cols = st.columns(4)
+                if (
+                    "new_customer_create_delivery_order" not in st.session_state
+                    and do_code
+                ):
+                    st.session_state["new_customer_create_delivery_order"] = True
                 create_delivery_order = create_cols[0].checkbox(
                     "Delivery order",
                     value=bool(st.session_state.get("new_customer_create_delivery_order")) or bool(do_code),
@@ -9235,10 +9556,6 @@ def customers_page(conn):
                     value=bool(st.session_state.get("new_customer_create_maintenance")),
                     key="new_customer_create_maintenance",
                 )
-                st.session_state["new_customer_create_delivery_order"] = create_delivery_order
-                st.session_state["new_customer_create_work_done"] = create_work_done
-                st.session_state["new_customer_create_service"] = create_service
-                st.session_state["new_customer_create_maintenance"] = create_maintenance
 
                 if create_delivery_order:
                     st.subheader("Delivery order details")
