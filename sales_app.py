@@ -3146,6 +3146,41 @@ def outstanding_payments(user: Dict) -> pd.DataFrame:
     )
 
 
+def products_sold_summary(user: Dict, limit: int = 8) -> pd.DataFrame:
+    where = ""
+    params: List = []
+    if user["role"] == "staff":
+        where = "WHERE d.salesperson_id=?"
+        params.append(user["user_id"])
+    query = textwrap.dedent(
+        f"""
+        WITH product_rows AS (
+            SELECT q.quotation_id,
+                   COALESCE(qp.category_id, q.category_id) AS category_id,
+                   COALESCE(qp.quantity, q.quantity, 1) AS quantity
+            FROM quotations q
+            LEFT JOIN quotation_products qp ON qp.quotation_id = q.quotation_id
+        )
+        SELECT cat.name AS product,
+               COALESCE(u.display_name, u.username) AS salesperson,
+               SUM(pr.quantity) AS quantity,
+               COUNT(DISTINCT d.do_id) AS delivery_orders
+        FROM delivery_orders d
+        LEFT JOIN work_orders w ON w.work_order_id = d.work_order_id
+        JOIN quotations q ON q.quotation_id = COALESCE(d.quotation_id, w.quotation_id)
+        JOIN product_rows pr ON pr.quotation_id = q.quotation_id
+        JOIN categories cat ON cat.category_id = pr.category_id
+        JOIN users u ON u.user_id = d.salesperson_id
+        {where}
+        GROUP BY cat.name, salesperson
+        ORDER BY quantity DESC, delivery_orders DESC, cat.name
+        LIMIT ?
+        """
+    )
+    params.append(limit)
+    return fetchall_df(query, tuple(params))
+
+
 def quotation_status_breakdown() -> Dict[str, Dict[str, int]]:
     df = fetchall_df("SELECT quote_date, status FROM quotations")
     if df.empty:
@@ -3387,20 +3422,45 @@ def render_dashboard(user: Dict) -> None:
         (counts.get("accepted", 0) / counts.get("total", 1)) * 100 if counts.get("total", 0) else 0.0
     )
 
-    metric_cols = st.columns(4)
-    metric_cols[0].metric("Total Quotations", counts.get("total", 0))
-    metric_cols[1].metric(
-        "Conversion rate",
-        f"{conversion_rate:.1f}%",
-        delta=f"{counts.get('accepted', 0)} accepted",
-    )
-    metric_cols[2].metric("Overdue follow-ups", len(overdue))
-    metric_cols[3].metric("Outstanding payments", f"${outstanding_total:,.2f}")
-
-    if counts.get("total", 0) == 0:
-        st.info(
-            "No quotations recorded yet. Use the Create quotation button above to get started."
+    overview_left, overview_right = st.columns([3, 1], gap="large")
+    with overview_left:
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Total Quotations", counts.get("total", 0))
+        metric_cols[1].metric(
+            "Conversion rate",
+            f"{conversion_rate:.1f}%",
+            delta=f"{counts.get('accepted', 0)} accepted",
         )
+        metric_cols[2].metric("Overdue follow-ups", len(overdue))
+        metric_cols[3].metric("Outstanding payments", f"${outstanding_total:,.2f}")
+
+        if counts.get("total", 0) == 0:
+            st.info(
+                "No quotations recorded yet. Use the Create quotation button above to get started."
+            )
+    with overview_right:
+        products_df = products_sold_summary(user)
+        heading = "Products sold" if user["role"] == "admin" else "My products sold"
+        st.subheader(heading)
+        if products_df.empty:
+            st.info("No delivery orders linked to products yet.")
+        else:
+            display_df = products_df.copy()
+            display_df["quantity"] = display_df["quantity"].fillna(0).astype(int)
+            display_df["delivery_orders"] = (
+                display_df["delivery_orders"].fillna(0).astype(int)
+            )
+            if user["role"] == "staff":
+                display_df = display_df.drop(columns=["salesperson"])
+            display_df = display_df.rename(
+                columns={
+                    "product": "Product",
+                    "salesperson": "Salesperson",
+                    "quantity": "Quantity",
+                    "delivery_orders": "Delivery orders",
+                }
+            )
+            st.dataframe(display_df, use_container_width=True, height=260)
 
     letters_df = list_quotation_letters(user)
     st.subheader("Quotation letter follow-ups")
