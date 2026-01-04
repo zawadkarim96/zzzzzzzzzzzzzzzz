@@ -7932,6 +7932,7 @@ def render_customer_quick_edit_section(
     limit_rows: Optional[int] = None,
     show_do_code: bool = True,
     show_duplicate: bool = True,
+    action_icon_only: bool = False,
 ) -> pd.DataFrame:
     pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
@@ -8074,7 +8075,10 @@ def render_customer_quick_edit_section(
             },
         )
     if show_heading and show_editor:
-        st.markdown("### Quick edit or delete")
+        heading_label = "### Quick edit or delete"
+        if action_icon_only:
+            heading_label = "### Quick edit"
+        st.markdown(heading_label)
     if df_raw.empty:
         if show_editor:
             st.info("No customers found for the current filters.")
@@ -8151,7 +8155,7 @@ def render_customer_quick_edit_section(
     header_cols[header_idx + 3].write("**Billing address**")
     header_cols[header_idx + 4].write("**Delivery address**")
     header_cols[header_idx + 5].write("**Remarks**")
-    header_cols[header_idx + 6].write("**Purchase date**")
+    header_cols[header_idx + 6].write("**Purchase date (not follow-up)**")
     header_cols[header_idx + 7].write("**Product**")
     col_offset = 8
     if show_do_code:
@@ -8161,7 +8165,8 @@ def render_customer_quick_edit_section(
         header_cols[header_idx + col_offset].write("**Duplicate**")
         col_offset += 1
     header_cols[header_idx + col_offset].write("**Upload**")
-    header_cols[header_idx + col_offset + 1].write("**Action**")
+    action_label = "**Action**" if not action_icon_only else "**Delete**"
+    header_cols[header_idx + col_offset + 1].write(action_label)
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
@@ -8287,12 +8292,36 @@ def render_customer_quick_edit_section(
                     if saved:
                         st.success("Document uploaded.")
                         _safe_rerun()
-        row_cols[row_idx + col_offset + 1].selectbox(
-            "Action",
-            options=["Keep", "Delete"],
-            key=action_key,
-            label_visibility="collapsed",
-        )
+        st.session_state.setdefault(action_key, "Keep")
+        action_value = st.session_state.get(action_key, "Keep")
+        action_col = row_cols[row_idx + col_offset + 1]
+        if action_icon_only:
+            delete_help = (
+                "Toggle delete selection (admin only)"
+                if is_admin
+                else "Admin access required to delete"
+            )
+            if action_col.button(
+                "🗑️",
+                key=f"{action_key}_trash",
+                help=delete_help,
+                disabled=not is_admin,
+                use_container_width=True,
+            ):
+                st.session_state[action_key] = (
+                    "Keep" if action_value == "Delete" else "Delete"
+                )
+                action_value = st.session_state[action_key]
+            if action_value == "Delete":
+                action_col.caption("Marked")
+        else:
+            action_col.selectbox(
+                "Action",
+                options=["Keep", "Delete"],
+                key=action_key,
+                label_visibility="collapsed",
+            )
+            action_value = st.session_state.get(action_key)
         editor_rows.append(
             {
                 "id": cid,
@@ -8308,7 +8337,7 @@ def render_customer_quick_edit_section(
                 if show_do_code
                 else clean_text(row.get("delivery_order_code")),
                 "sales_person": row.get("sales_person"),
-                "Action": st.session_state.get(action_key),
+                "Action": action_value,
             }
         )
     if not is_admin:
@@ -14571,15 +14600,33 @@ def delivery_orders_page(
             key="delivery_order_status",
         )
         receipt_upload = None
-        if status_value == "paid":
+        if status_value in {"advanced", "paid"}:
+            receipt_label = (
+                f"{record_label} advance receipt (PDF or image)"
+                if status_value == "advanced"
+                else f"{record_label} full payment receipt (PDF or image)"
+            )
+            receipt_help = (
+                "Upload proof of advance payment."
+                if status_value == "advanced"
+                else "Upload proof of payment before locking the record."
+            )
             receipt_upload = st.file_uploader(
-                f"{record_label} payment receipt (PDF or image)",
+                receipt_label,
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{record_label.lower().replace(' ', '_')}_receipt_upload",
-                help="Upload proof of payment before locking the record.",
+                help=receipt_help,
             )
             if current_receipt_path:
-                st.caption("A receipt is already attached; uploading a new file will replace it.")
+                receipt_file = resolve_upload_path(current_receipt_path)
+                if receipt_file and receipt_file.exists():
+                    st.download_button(
+                        "View current receipt",
+                        data=receipt_file.read_bytes(),
+                        file_name=receipt_file.name,
+                        key=f"{record_label.lower().replace(' ', '_')}_receipt_view",
+                    )
+                st.caption("Uploading a new file will replace the current receipt.")
         st.markdown("**Products / items**")
         items_df_seed = pd.DataFrame(
             st.session_state.get("delivery_order_items_rows", _default_delivery_items())
@@ -14673,8 +14720,17 @@ def delivery_orders_page(
                     DELIVERY_ORDER_DIR,
                     filename=f"do_{_sanitize_path_component(cleaned_number)}.pdf",
                 )
+            auto_mark_paid = False
+            if (
+                status_value == "advanced"
+                and existing_status == "advanced"
+                and existing_receipt
+                and receipt_upload is not None
+            ):
+                auto_mark_paid = True
+                status_value = "paid"
             receipt_path = existing_receipt
-            if status_value == "paid":
+            if status_value in {"advanced", "paid"}:
                 if receipt_upload:
                     receipt_identifier = _sanitize_path_component(cleaned_number) or "do_receipt"
                     receipt_path = store_payment_receipt(
@@ -14683,8 +14739,27 @@ def delivery_orders_page(
                         target_dir=DELIVERY_RECEIPT_DIR,
                     )
                 if not receipt_path:
-                    st.error("Upload a receipt before marking this record as paid.")
+                    missing_label = "advance" if status_value == "advanced" else "full payment"
+                    st.error(f"Upload an {missing_label} receipt before saving this record.")
                     return
+            if auto_mark_paid and existing_receipt and selected_customer:
+                advance_receipt_path = clean_text(existing_receipt)
+                resolved_advance = resolve_upload_path(advance_receipt_path)
+                if resolved_advance and resolved_advance.exists():
+                    conn.execute(
+                        """
+                        INSERT INTO customer_documents (
+                            customer_id, doc_type, file_path, original_name, uploaded_by
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            int(selected_customer),
+                            f"{record_label} advance receipt",
+                            advance_receipt_path,
+                            resolved_advance.name,
+                            current_user_id(),
+                        ),
+                    )
             if receipt_only_update:
                 conn.execute(
                     """
@@ -15075,6 +15150,7 @@ def operations_page(conn):
             limit_rows=50,
             show_do_code=False,
             show_duplicate=False,
+            action_icon_only=True,
         )
     st.markdown("---")
     record_options = {
