@@ -5577,7 +5577,12 @@ def recalc_customer_duplicate_flag(conn, phone):
 
 
 def init_ui():
-    st.set_page_config(page_title="PS Business Suites", page_icon="🧰", layout="wide")
+    st.set_page_config(
+        page_title="PS Business Suites",
+        page_icon="🧰",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     if "user" not in st.session_state:
         st.session_state.user = None
     if st.session_state.user:
@@ -18484,6 +18489,30 @@ def main():
     # Auth gate: stop rendering any dashboard/navigation without a user session.
     if not st.session_state.get("user"):
         st.stop()
+
+    if "sidebar_visible" not in st.session_state:
+        st.session_state["sidebar_visible"] = True
+
+    sidebar_visible = st.session_state.get("sidebar_visible", True)
+    toggle_label = "Hide menu" if sidebar_visible else "Show menu"
+    if st.button(toggle_label, key="sidebar_toggle_button"):
+        st.session_state["sidebar_visible"] = not sidebar_visible
+        st.rerun()
+
+    if not st.session_state.get("sidebar_visible", True):
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebar"] {
+                display: none !important;
+            }
+            [data-testid="stAppViewContainer"] {
+                margin-left: 0 !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if "page" not in st.session_state:
         st.session_state.page = "Dashboard"
