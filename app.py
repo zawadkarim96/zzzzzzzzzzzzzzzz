@@ -7868,7 +7868,9 @@ def render_customer_quick_edit_section(
     show_editor: bool = True,
     show_filters: bool = True,
     show_id: bool = True,
+    enable_pagination: bool = False,
 ) -> pd.DataFrame:
+    pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
         sort_dir = st.radio(
             "Sort by created date",
@@ -7881,9 +7883,18 @@ def render_customer_quick_edit_section(
             "Search (name/phone/address/product/DO)",
             key=f"{key_prefix}_search",
         )
+        if pagination_enabled:
+            page_size = st.selectbox(
+                "Rows per page",
+                options=[25, 50, 100],
+                index=1,
+                key=f"{key_prefix}_page_size",
+            )
     else:
         order = "DESC"
         q = ""
+        if pagination_enabled:
+            page_size = 50
     scope_clause, scope_params = customer_scope_filter("c")
     search_clause = dedent(
         """
@@ -7905,6 +7916,28 @@ def render_customer_quick_edit_section(
         where_parts.append(scope_clause)
         params.extend(scope_params)
     where_sql = " AND ".join(where_parts)
+    limit_clause = ""
+    total_count = None
+    if pagination_enabled:
+        total_count = int(
+            df_query(
+                conn,
+                f"SELECT COUNT(*) AS cnt FROM customers c WHERE {where_sql}",
+                tuple(params),
+            ).iloc[0]["cnt"]
+        )
+        total_pages = max(1, math.ceil(total_count / page_size)) if page_size else 1
+        page_number = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"{key_prefix}_page",
+        )
+        offset = (page_number - 1) * page_size
+        limit_clause = f"LIMIT {page_size} OFFSET {offset}"
+        st.caption(f"Showing page {page_number} of {total_pages} ({total_count} customers).")
     df_raw = df_query(
         conn,
         f"""
@@ -7929,6 +7962,7 @@ def render_customer_quick_edit_section(
         LEFT JOIN users u ON u.user_id = c.created_by
         WHERE {where_sql}
         ORDER BY datetime(c.created_at) {order}
+        {limit_clause}
     """,
         tuple(params),
     )
@@ -8450,6 +8484,24 @@ def _render_doc_detail_inputs(
             format="%.2f",
             key=f"{key_prefix}_quotation_total",
         )
+        details["product_info"] = st.text_area(
+            "Product details",
+            value=clean_text(defaults.get("product_info")) or "",
+            key=f"{key_prefix}_quotation_products",
+        )
+        details["payment_status"] = st.selectbox(
+            "Payment status",
+            options=["due", "advanced", "paid"],
+            key=f"{key_prefix}_quotation_payment_status",
+            format_func=lambda status: status.title(),
+        )
+        details["receipt_upload"] = None
+        if details["payment_status"] == "paid":
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (required for paid)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_quotation_receipt",
+            )
     elif doc_type in ("Delivery order", "Work done"):
         label = "Delivery order number" if doc_type == "Delivery order" else "Work done number"
         details["do_number"] = st.text_input(
@@ -8565,6 +8617,11 @@ def _save_customer_document_upload(
         if status_value == "paid" and details.get("receipt_upload") is None:
             st.error("Upload a receipt before marking this as paid.")
             return False
+    if doc_type == "Quotation":
+        status_value = clean_text(details.get("payment_status")) or "due"
+        if status_value == "paid" and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this quotation as paid.")
+            return False
     if doc_type == "Service":
         if details.get("payment_status") == "paid" and details.get("receipt_upload") is None:
             st.error("Upload a receipt before marking this as paid.")
@@ -8619,6 +8676,21 @@ def _save_customer_document_upload(
     )
 
     if doc_type == "Quotation":
+        receipt_path = None
+        receipt_upload = details.get("receipt_upload")
+        if receipt_upload is not None:
+            safe_ref = _sanitize_path_component(
+                clean_text(details.get("reference")) or f"quotation_{customer_id}"
+            )
+            receipt_path = store_payment_receipt(
+                receipt_upload,
+                identifier=f"{safe_ref}_receipt",
+                target_dir=QUOTATION_RECEIPT_DIR,
+            )
+        product_info = clean_text(details.get("product_info"))
+        items_payload = None
+        if product_info:
+            items_payload = json.dumps([{"Description": product_info}])
         payload = {
             "reference": clean_text(details.get("reference")),
             "quote_date": to_iso_date(details.get("quote_date")),
@@ -8627,8 +8699,10 @@ def _save_customer_document_upload(
             "customer_address": clean_text(customer_record.get("address")),
             "customer_contact": clean_text(customer_record.get("phone")),
             "total_amount": _coerce_float(details.get("total_amount"), 0.0),
-            "status": "due",
+            "status": clean_text(details.get("payment_status")) or "due",
+            "payment_receipt_path": receipt_path,
             "document_path": stored_path,
+            "items_payload": items_payload,
             "created_by": uploader_id,
         }
         _save_quotation_record(conn, payload)
@@ -14566,7 +14640,11 @@ def operations_page(conn):
     )
     with st.expander("Customer quick edit", expanded=False):
         render_customer_quick_edit_section(
-            conn, key_prefix="operations_customers", include_leads=False, show_id=False
+            conn,
+            key_prefix="operations_customers",
+            include_leads=False,
+            show_id=False,
+            enable_pagination=True,
         )
     st.markdown("---")
     record_options = {
