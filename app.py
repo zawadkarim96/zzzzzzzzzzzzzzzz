@@ -8012,10 +8012,7 @@ def render_customer_quick_edit_section(
             "purchase_date",
             "product_info",
             "delivery_order_code",
-            "sales_person",
             "duplicate",
-            "created_at",
-            "uploaded_by",
             "Action",
         ]
         if col in editor_df.columns
@@ -8041,12 +8038,9 @@ def render_customer_quick_edit_section(
             1.0,
             1.6,
             1.0,
-            1.0,
             0.9,
             1.0,
             1.2,
-            1.2,
-            1.1,
             1.0,
         )
     )
@@ -8060,13 +8054,10 @@ def render_customer_quick_edit_section(
     header_cols[7].write("**Purchase date**")
     header_cols[8].write("**Product**")
     header_cols[9].write("**DO code**")
-    header_cols[10].write("**Sales person**")
-    header_cols[11].write("**Duplicate**")
-    header_cols[12].write("**File type**")
-    header_cols[13].write("**➕ Upload**")
-    header_cols[14].write("**Created**")
-    header_cols[15].write("**Uploaded by**")
-    header_cols[16].write("**Action**")
+    header_cols[10].write("**Duplicate**")
+    header_cols[11].write("**File type**")
+    header_cols[12].write("**➕ Upload**")
+    header_cols[13].write("**Action**")
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
@@ -8084,12 +8075,9 @@ def render_customer_quick_edit_section(
                 1.0,
                 1.6,
                 1.0,
-                1.0,
                 0.9,
                 1.0,
                 1.2,
-                1.2,
-                1.1,
                 1.0,
             )
         )
@@ -8103,15 +8091,10 @@ def render_customer_quick_edit_section(
         purchase_key = f"{key_prefix}_quick_purchase_{cid}"
         product_key = f"{key_prefix}_quick_product_{cid}"
         do_key = f"{key_prefix}_quick_do_{cid}"
-        sales_key = f"{key_prefix}_quick_sales_{cid}"
         file_type_key = f"{key_prefix}_quick_file_type_{cid}"
         upload_key = f"{key_prefix}_quick_upload_{cid}"
         upload_btn_key = f"{key_prefix}_quick_upload_btn_{cid}"
         action_key = f"{key_prefix}_quick_action_{cid}"
-        created_at = row.get("created_at")
-        created_label = ""
-        if isinstance(created_at, (datetime, pd.Timestamp)) and not pd.isna(created_at):
-            created_label = created_at.strftime("%d-%m-%Y %H:%M")
         purchase_date_value = row.get("purchase_date")
         purchase_date_label = ""
         if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
@@ -8170,26 +8153,20 @@ def render_customer_quick_edit_section(
             key=do_key,
             label_visibility="collapsed",
         )
-        row_cols[10].text_input(
-            "Sales person",
-            value=clean_text(row.get("sales_person")) or "",
-            key=sales_key,
-            label_visibility="collapsed",
-        )
-        row_cols[11].write(clean_text(row.get("duplicate")) or "")
-        row_cols[12].selectbox(
+        row_cols[10].write(clean_text(row.get("duplicate")) or "")
+        row_cols[11].selectbox(
             "File type",
             options=doc_type_options,
             key=file_type_key,
             label_visibility="collapsed",
         )
-        upload_file = row_cols[13].file_uploader(
+        upload_file = row_cols[12].file_uploader(
             "Upload document",
             type=["pdf", "png", "jpg", "jpeg", "webp"],
             key=upload_key,
             label_visibility="collapsed",
         )
-        if row_cols[13].button("➕", key=upload_btn_key, help="Upload document"):
+        if row_cols[12].button("➕", key=upload_btn_key, help="Upload document"):
             if upload_file is None:
                 st.warning("Select a file to upload.")
             else:
@@ -8234,9 +8211,7 @@ def render_customer_quick_edit_section(
                     _safe_rerun()
                 else:
                     st.error("Unable to save the uploaded file.")
-        row_cols[14].write(created_label or "-")
-        row_cols[15].write(clean_text(row.get("uploaded_by")) or "-")
-        row_cols[16].selectbox(
+        row_cols[13].selectbox(
             "Action",
             options=["Keep", "Delete"],
             key=action_key,
@@ -8254,7 +8229,7 @@ def render_customer_quick_edit_section(
                 "purchase_date": st.session_state.get(purchase_key),
                 "product_info": st.session_state.get(product_key),
                 "delivery_order_code": st.session_state.get(do_key),
-                "sales_person": st.session_state.get(sales_key),
+                "sales_person": row.get("sales_person"),
                 "Action": st.session_state.get(action_key),
             }
         )
@@ -18576,7 +18551,6 @@ def main():
         st.session_state["page"] = selection
 
     st.session_state["nav_selection_sidebar"] = current_page
-    st.session_state["nav_selection_ribbon"] = current_page
 
     with st.sidebar:
         sidebar_dark = st.toggle(
@@ -18600,48 +18574,30 @@ def main():
             _request_logout()
             st.rerun()
 
-    nav_col, content_col = st.columns([1, 5], gap="large")
-    with nav_col:
-        st.markdown('<div class="ps-ribbon-nav">', unsafe_allow_html=True)
-        st.markdown("### Navigation")
-        st.radio(
-            "Navigate",
-            pages,
-            index=pages.index(current_page),
-            key="nav_selection_ribbon",
-            on_change=lambda: _sync_nav_choice("nav_selection_ribbon"),
-        )
-        st.divider()
-        if st.button("Logout", key="ribbon_logout_main", use_container_width=True):
-            _request_logout()
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
     page = st.session_state.get("nav_page", pages[0])
     st.session_state.page = page
-    with content_col:
-        show_expiry_notifications(conn)
+    show_expiry_notifications(conn)
 
-        if page == "Dashboard":
-            dashboard(conn)
-        elif page == "Operations":
-            operations_page(conn)
-        elif page == "Quotation":
-            quotation_page(conn, render_id=render_id)
-        elif page == "Customers":
-            customers_hub_page(conn)
-        elif page == "Scraps":
-            scraps_page(conn)
-        elif page == "Warranties":
-            warranties_page(conn)
-        elif page == "Advanced Search":
-            advanced_search_page(conn)
-        elif page == "Reports":
-            reports_page(conn)
-        elif page == "Duplicates":
-            duplicates_page(conn)
-        elif page == "Users (Admin)":
-            users_admin_page(conn)
+    if page == "Dashboard":
+        dashboard(conn)
+    elif page == "Operations":
+        operations_page(conn)
+    elif page == "Quotation":
+        quotation_page(conn, render_id=render_id)
+    elif page == "Customers":
+        customers_hub_page(conn)
+    elif page == "Scraps":
+        scraps_page(conn)
+    elif page == "Warranties":
+        warranties_page(conn)
+    elif page == "Advanced Search":
+        advanced_search_page(conn)
+    elif page == "Reports":
+        reports_page(conn)
+    elif page == "Duplicates":
+        duplicates_page(conn)
+    elif page == "Users (Admin)":
+        users_admin_page(conn)
 
 if __name__ == "__main__":
     if _streamlit_runtime_active():
