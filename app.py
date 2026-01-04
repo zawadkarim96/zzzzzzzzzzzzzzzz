@@ -5598,6 +5598,9 @@ def init_ui():
             div[data-testid="stDecoration"] {
                 display: none !important;
             }
+            [data-testid="stSidebar"] {
+                display: block !important;
+            }
             </style>
             """,
             unsafe_allow_html=True,
