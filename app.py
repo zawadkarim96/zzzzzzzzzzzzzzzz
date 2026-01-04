@@ -7867,6 +7867,7 @@ def render_customer_quick_edit_section(
     show_heading: bool = True,
     show_editor: bool = True,
     show_filters: bool = True,
+    show_id: bool = True,
 ) -> pd.DataFrame:
     if show_filters:
         sort_dir = st.radio(
@@ -8024,62 +8025,48 @@ def render_customer_quick_edit_section(
         "Maintenance",
         "Other",
     ]
-    header_cols = st.columns(
-        (
-            0.5,
-            1.2,
-            1.2,
-            1.0,
-            1.4,
-            1.4,
-            1.2,
-            1.0,
-            1.6,
-            1.0,
-            0.9,
-            1.0,
-            1.2,
-            1.0,
-        )
-    )
-    header_cols[0].write("**ID**")
-    header_cols[1].write("**Name**")
-    header_cols[2].write("**Company**")
-    header_cols[3].write("**Phone**")
-    header_cols[4].write("**Billing address**")
-    header_cols[5].write("**Delivery address**")
-    header_cols[6].write("**Remarks**")
-    header_cols[7].write("**Purchase date**")
-    header_cols[8].write("**Product**")
-    header_cols[9].write("**DO code**")
-    header_cols[10].write("**Duplicate**")
-    header_cols[11].write("**File type**")
-    header_cols[12].write("**➕ Upload**")
-    header_cols[13].write("**Action**")
+    base_widths = [
+        1.2,
+        1.2,
+        1.0,
+        1.4,
+        1.4,
+        1.2,
+        1.0,
+        1.6,
+        1.0,
+        0.9,
+        1.4,
+        1.0,
+    ]
+    widths = [0.5, *base_widths] if show_id else base_widths
+    header_cols = st.columns(tuple(widths))
+    header_idx = 0
+    if show_id:
+        header_cols[header_idx].write("**ID**")
+        header_idx += 1
+    header_cols[header_idx + 0].write("**Name**")
+    header_cols[header_idx + 1].write("**Company**")
+    header_cols[header_idx + 2].write("**Phone**")
+    header_cols[header_idx + 3].write("**Billing address**")
+    header_cols[header_idx + 4].write("**Delivery address**")
+    header_cols[header_idx + 5].write("**Remarks**")
+    header_cols[header_idx + 6].write("**Purchase date**")
+    header_cols[header_idx + 7].write("**Product**")
+    header_cols[header_idx + 8].write("**DO code**")
+    header_cols[header_idx + 9].write("**Duplicate**")
+    header_cols[header_idx + 10].write("**Upload**")
+    header_cols[header_idx + 11].write("**Action**")
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
         if cid is None:
             continue
-        row_cols = st.columns(
-            (
-                0.5,
-                1.2,
-                1.2,
-                1.0,
-                1.4,
-                1.4,
-                1.2,
-                1.0,
-                1.6,
-                1.0,
-                0.9,
-                1.0,
-                1.2,
-                1.0,
-            )
-        )
-        row_cols[0].write(cid)
+        row_cols = st.columns(tuple(widths))
+        row_idx = 0
+        if show_id:
+            row_cols[row_idx].write(cid)
+            row_idx += 1
         name_key = f"{key_prefix}_quick_name_{cid}"
         company_key = f"{key_prefix}_quick_company_{cid}"
         phone_key = f"{key_prefix}_quick_phone_{cid}"
@@ -8097,119 +8084,100 @@ def render_customer_quick_edit_section(
         purchase_date_label = ""
         if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
             purchase_date_label = purchase_date_value.strftime(DATE_FMT)
-        row_cols[1].text_input(
+        row_cols[row_idx + 0].text_input(
             "Name",
             value=clean_text(row.get("name")) or "",
             key=name_key,
             label_visibility="collapsed",
         )
-        row_cols[2].text_input(
+        row_cols[row_idx + 1].text_input(
             "Company",
             value=clean_text(row.get("company_name")) or "",
             key=company_key,
             label_visibility="collapsed",
         )
-        row_cols[3].text_input(
+        row_cols[row_idx + 2].text_input(
             "Phone",
             value=clean_text(row.get("phone")) or "",
             key=phone_key,
             label_visibility="collapsed",
         )
-        row_cols[4].text_input(
+        row_cols[row_idx + 3].text_input(
             "Billing address",
             value=clean_text(row.get("address")) or "",
             key=address_key,
             label_visibility="collapsed",
         )
-        row_cols[5].text_input(
+        row_cols[row_idx + 4].text_input(
             "Delivery address",
             value=clean_text(row.get("delivery_address")) or "",
             key=delivery_key,
             label_visibility="collapsed",
         )
-        row_cols[6].text_input(
+        row_cols[row_idx + 5].text_input(
             "Remarks",
             value=clean_text(row.get("remarks")) or "",
             key=remarks_key,
             label_visibility="collapsed",
         )
-        row_cols[7].text_input(
+        row_cols[row_idx + 6].text_input(
             "Purchase date",
             value=purchase_date_label,
             key=purchase_key,
             label_visibility="collapsed",
         )
-        row_cols[8].text_input(
+        row_cols[row_idx + 7].text_input(
             "Product",
             value=clean_text(row.get("product_info")) or "",
             key=product_key,
             label_visibility="collapsed",
         )
-        row_cols[9].text_input(
+        row_cols[row_idx + 8].text_input(
             "DO code",
             value=clean_text(row.get("delivery_order_code")) or "",
             key=do_key,
             label_visibility="collapsed",
         )
-        row_cols[10].write(clean_text(row.get("duplicate")) or "")
-        row_cols[11].selectbox(
-            "File type",
-            options=doc_type_options,
-            key=file_type_key,
-            label_visibility="collapsed",
-        )
-        upload_file = row_cols[12].file_uploader(
-            "Upload document",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            key=upload_key,
-            label_visibility="collapsed",
-        )
-        if row_cols[12].button("➕", key=upload_btn_key, help="Upload document"):
-            if upload_file is None:
-                st.warning("Select a file to upload.")
-            else:
-                doc_type = st.session_state.get(file_type_key) or "Other"
-                doc_type_slug = (
-                    _sanitize_path_component(doc_type.lower().replace(" ", "_"))
-                    or "document"
-                )
-                target_dir = CUSTOMER_DOCS_DIR / doc_type_slug
-                target_dir.mkdir(parents=True, exist_ok=True)
-                original_name = upload_file.name or f"{doc_type_slug}_{cid}.pdf"
-                safe_original = Path(original_name).name
-                filename = f"{doc_type_slug}_{cid}_{safe_original}"
-                saved_path = save_uploaded_file(
-                    upload_file,
-                    target_dir,
-                    filename=filename,
-                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                    default_extension=".pdf",
-                )
-                if saved_path:
-                    try:
-                        stored_path = str(saved_path.relative_to(BASE_DIR))
-                    except ValueError:
-                        stored_path = str(saved_path)
-                    conn.execute(
-                        """
-                        INSERT INTO customer_documents (
-                            customer_id, doc_type, file_path, original_name, uploaded_by
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            cid,
-                            doc_type,
-                            stored_path,
-                            safe_original,
-                            current_user_id(),
-                        ),
-                    )
-                    conn.commit()
-                    st.success("Document uploaded.")
-                    _safe_rerun()
+        row_cols[row_idx + 9].write(clean_text(row.get("duplicate")) or "")
+        upload_container = getattr(st, "popover", None)
+        upload_target = row_cols[row_idx + 10]
+        if callable(upload_container):
+            upload_panel = upload_target.popover("Upload", use_container_width=True)
+        else:
+            upload_panel = upload_target.expander("Upload", expanded=False)
+        with upload_panel:
+            doc_type = st.selectbox(
+                "Document type",
+                options=doc_type_options,
+                key=file_type_key,
+            )
+            upload_file = st.file_uploader(
+                "Upload document",
+                type=None,
+                accept_multiple_files=False,
+                key=upload_key,
+            )
+            details = _render_doc_detail_inputs(
+                doc_type,
+                key_prefix=f"{upload_key}_details",
+                defaults=row,
+            )
+            if st.button("Save upload", key=upload_btn_key):
+                if upload_file is None:
+                    st.warning("Select a file to upload.")
                 else:
-                    st.error("Unable to save the uploaded file.")
-        row_cols[13].selectbox(
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=cid,
+                        customer_record=row,
+                        doc_type=doc_type,
+                        upload_file=upload_file,
+                        details=details,
+                    )
+                    if saved:
+                        st.success("Document uploaded.")
+                        _safe_rerun()
+        row_cols[row_idx + 11].selectbox(
             "Action",
             options=["Keep", "Delete"],
             key=action_key,
@@ -8456,6 +8424,328 @@ def render_customer_quick_edit_section(
     return df_raw
 
 
+def _render_doc_detail_inputs(
+    doc_type: str,
+    *,
+    key_prefix: str,
+    defaults: Optional[dict[str, object]] = None,
+) -> dict[str, object]:
+    defaults = defaults or {}
+    details: dict[str, object] = {}
+    if doc_type == "Quotation":
+        details["reference"] = st.text_input(
+            "Quotation reference",
+            key=f"{key_prefix}_quotation_reference",
+        )
+        details["quote_date"] = st.date_input(
+            "Quotation date",
+            value=date.today(),
+            key=f"{key_prefix}_quotation_date",
+            format="DD-MM-YYYY",
+        )
+        details["total_amount"] = st.number_input(
+            "Quotation total amount (BDT)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.2f",
+            key=f"{key_prefix}_quotation_total",
+        )
+    elif doc_type in ("Delivery order", "Work done"):
+        label = "Delivery order number" if doc_type == "Delivery order" else "Work done number"
+        details["do_number"] = st.text_input(
+            label,
+            key=f"{key_prefix}_do_number",
+        )
+        details["status"] = st.selectbox(
+            "Status",
+            options=DELIVERY_STATUS_OPTIONS,
+            key=f"{key_prefix}_do_status",
+            format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
+        )
+        details["sales_person"] = st.text_input(
+            "Sales person",
+            value=clean_text(defaults.get("sales_person")) or "",
+            key=f"{key_prefix}_do_sales_person",
+        )
+        details["description"] = st.text_area(
+            "Description",
+            key=f"{key_prefix}_do_description",
+        )
+        details["remarks"] = st.text_area(
+            "Remarks",
+            key=f"{key_prefix}_do_remarks",
+        )
+        details["receipt_upload"] = None
+        if details["status"] == "paid":
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (required for paid)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_do_receipt",
+            )
+    elif doc_type == "Service":
+        details["service_date"] = st.date_input(
+            "Service date",
+            value=date.today(),
+            key=f"{key_prefix}_service_date",
+            format="DD-MM-YYYY",
+        )
+        details["description"] = st.text_area(
+            "Service description",
+            key=f"{key_prefix}_service_description",
+        )
+        details["remarks"] = st.text_area(
+            "Remarks",
+            key=f"{key_prefix}_service_remarks",
+        )
+        details["product_info"] = st.text_input(
+            "Products sold",
+            key=f"{key_prefix}_service_products",
+        )
+        details["payment_status"] = st.selectbox(
+            "Payment status",
+            ["pending", "paid"],
+            key=f"{key_prefix}_service_payment_status",
+        )
+        details["receipt_upload"] = None
+        if details["payment_status"] == "paid":
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (required for paid)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_service_receipt",
+            )
+    elif doc_type == "Maintenance":
+        details["maintenance_date"] = st.date_input(
+            "Maintenance date",
+            value=date.today(),
+            key=f"{key_prefix}_maintenance_date",
+            format="DD-MM-YYYY",
+        )
+        details["description"] = st.text_area(
+            "Maintenance description",
+            key=f"{key_prefix}_maintenance_description",
+        )
+        details["remarks"] = st.text_area(
+            "Remarks",
+            key=f"{key_prefix}_maintenance_remarks",
+        )
+        details["product_info"] = st.text_input(
+            "Products sold",
+            key=f"{key_prefix}_maintenance_products",
+        )
+        details["payment_status"] = st.selectbox(
+            "Payment status",
+            ["pending", "paid"],
+            key=f"{key_prefix}_maintenance_payment_status",
+        )
+        details["receipt_upload"] = None
+        if details["payment_status"] == "paid":
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (required for paid)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_maintenance_receipt",
+            )
+    return details
+
+
+def _save_customer_document_upload(
+    conn,
+    *,
+    customer_id: int,
+    customer_record: dict[str, object],
+    doc_type: str,
+    upload_file,
+    details: dict[str, object],
+) -> bool:
+    if doc_type in ("Delivery order", "Work done"):
+        do_number = clean_text(details.get("do_number"))
+        if not do_number:
+            st.error("Provide a delivery/work done number before saving.")
+            return False
+        status_value = normalize_delivery_status(details.get("status"))
+        if status_value == "paid" and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as paid.")
+            return False
+    if doc_type == "Service":
+        if details.get("payment_status") == "paid" and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as paid.")
+            return False
+    if doc_type == "Maintenance":
+        if details.get("payment_status") == "paid" and details.get("receipt_upload") is None:
+            st.error("Upload a receipt before marking this as paid.")
+            return False
+
+    doc_dir_map = {
+        "Delivery order": DELIVERY_ORDER_DIR,
+        "Work done": DELIVERY_ORDER_DIR,
+        "Quotation": QUOTATION_DOCS_DIR,
+        "Service": SERVICE_DOCS_DIR,
+        "Maintenance": MAINTENANCE_DOCS_DIR,
+    }
+    target_dir = doc_dir_map.get(doc_type, CUSTOMER_DOCS_DIR)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    doc_type_slug = _sanitize_path_component(doc_type.lower().replace(" ", "_")) or "document"
+    original_name = upload_file.name or f"{doc_type_slug}_{customer_id}.pdf"
+    safe_original = Path(original_name).name
+    filename = f"{doc_type_slug}_{customer_id}_{safe_original}"
+    saved_path = save_uploaded_file(
+        upload_file,
+        target_dir,
+        filename=filename,
+        allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+        default_extension=".pdf",
+    )
+    if not saved_path:
+        st.error("Unable to save the uploaded file.")
+        return False
+    try:
+        stored_path = str(saved_path.relative_to(BASE_DIR))
+    except ValueError:
+        stored_path = str(saved_path)
+
+    uploader_id = current_user_id()
+    conn.execute(
+        """
+        INSERT INTO customer_documents (
+            customer_id, doc_type, file_path, original_name, uploaded_by
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(customer_id),
+            doc_type,
+            stored_path,
+            safe_original,
+            uploader_id,
+        ),
+    )
+
+    if doc_type == "Quotation":
+        payload = {
+            "reference": clean_text(details.get("reference")),
+            "quote_date": to_iso_date(details.get("quote_date")),
+            "customer_name": clean_text(customer_record.get("name")),
+            "customer_company": clean_text(customer_record.get("company_name")),
+            "customer_address": clean_text(customer_record.get("address")),
+            "customer_contact": clean_text(customer_record.get("phone")),
+            "total_amount": _coerce_float(details.get("total_amount"), 0.0),
+            "status": "due",
+            "document_path": stored_path,
+            "created_by": uploader_id,
+        }
+        _save_quotation_record(conn, payload)
+    elif doc_type in ("Delivery order", "Work done"):
+        do_number = clean_text(details.get("do_number"))
+        status_value = normalize_delivery_status(details.get("status"))
+        receipt_path = None
+        receipt_upload = details.get("receipt_upload")
+        if receipt_upload is not None:
+            receipt_path = store_payment_receipt(
+                receipt_upload,
+                identifier=f"{_sanitize_path_component(do_number)}_receipt",
+            )
+        conn.execute(
+            """
+            INSERT INTO delivery_orders (
+                do_number, customer_id, description, sales_person, remarks, file_path,
+                record_type, status, payment_receipt_path, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(do_number) DO UPDATE SET
+                customer_id=excluded.customer_id,
+                description=excluded.description,
+                sales_person=excluded.sales_person,
+                remarks=excluded.remarks,
+                file_path=COALESCE(excluded.file_path, delivery_orders.file_path),
+                record_type=excluded.record_type,
+                status=excluded.status,
+                payment_receipt_path=COALESCE(excluded.payment_receipt_path, delivery_orders.payment_receipt_path),
+                updated_at=datetime('now')
+            """,
+            (
+                do_number,
+                int(customer_id),
+                clean_text(details.get("description")),
+                clean_text(details.get("sales_person")),
+                clean_text(details.get("remarks")),
+                stored_path,
+                "work_done" if doc_type == "Work done" else "delivery_order",
+                status_value,
+                receipt_path,
+            ),
+        )
+    elif doc_type == "Service":
+        receipt_path = None
+        receipt_upload = details.get("receipt_upload")
+        if receipt_upload is not None:
+            receipt_path = store_payment_receipt(
+                receipt_upload,
+                identifier=f"{_sanitize_path_component(str(customer_id))}_service_receipt",
+            )
+        cur = conn.execute(
+            """
+            INSERT INTO services (
+                customer_id, service_date, description, remarks, service_product_info,
+                status, payment_status, payment_receipt_path, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(customer_id),
+                to_iso_date(details.get("service_date")),
+                clean_text(details.get("description")),
+                clean_text(details.get("remarks")),
+                clean_text(details.get("product_info")),
+                DEFAULT_SERVICE_STATUS,
+                details.get("payment_status") or "pending",
+                receipt_path,
+                uploader_id,
+            ),
+        )
+        service_id = cur.lastrowid
+        conn.execute(
+            """
+            INSERT INTO service_documents (service_id, file_path, original_name)
+            VALUES (?, ?, ?)
+            """,
+            (service_id, stored_path, safe_original),
+        )
+    elif doc_type == "Maintenance":
+        receipt_path = None
+        receipt_upload = details.get("receipt_upload")
+        if receipt_upload is not None:
+            receipt_path = store_payment_receipt(
+                receipt_upload,
+                identifier=f"{_sanitize_path_component(str(customer_id))}_maintenance_receipt",
+            )
+        cur = conn.execute(
+            """
+            INSERT INTO maintenance_records (
+                customer_id, maintenance_date, description, remarks, maintenance_product_info,
+                status, payment_status, payment_receipt_path, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(customer_id),
+                to_iso_date(details.get("maintenance_date")),
+                clean_text(details.get("description")),
+                clean_text(details.get("remarks")),
+                clean_text(details.get("product_info")),
+                DEFAULT_SERVICE_STATUS,
+                details.get("payment_status") or "pending",
+                receipt_path,
+                uploader_id,
+            ),
+        )
+        maintenance_id = cur.lastrowid
+        conn.execute(
+            """
+            INSERT INTO maintenance_documents (maintenance_id, file_path, original_name)
+            VALUES (?, ?, ?)
+            """,
+            (maintenance_id, stored_path, safe_original),
+        )
+
+    conn.commit()
+    return True
+
+
 def render_customer_document_uploader(
     conn,
     *,
@@ -8482,67 +8772,50 @@ def render_customer_document_uploader(
             format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
             key=f"{key_prefix}_customer",
         )
+        customer_seed = df_query(
+            conn,
+            """
+            SELECT name, company_name, phone, address, delivery_address, sales_person
+            FROM customers
+            WHERE customer_id=?
+            """,
+            (int(selected_customer),),
+        )
+        customer_record = (
+            customer_seed.iloc[0].to_dict() if not customer_seed.empty else {}
+        )
         doc_type = st.selectbox(
             "Document type",
             doc_types,
             key=f"{key_prefix}_doc_type",
         )
-        upload_files = st.file_uploader(
-            "Upload documents",
+        upload_file = st.file_uploader(
+            "Upload document",
             type=None,
-            accept_multiple_files=True,
-            key=f"{key_prefix}_files",
+            accept_multiple_files=False,
+            key=f"{key_prefix}_file",
             help="Upload PDFs, images, or any other supporting documents.",
         )
-        if st.button("Save documents", key=f"{key_prefix}_save"):
-            if not upload_files:
-                st.error("Select one or more documents to upload.")
+        details = _render_doc_detail_inputs(
+            doc_type,
+            key_prefix=f"{key_prefix}_details",
+            defaults=customer_record,
+        )
+        if st.button("Save document", key=f"{key_prefix}_save"):
+            if upload_file is None:
+                st.error("Select a document to upload.")
             else:
-                doc_type_slug = _sanitize_path_component(doc_type.lower().replace(" ", "_")) or "document"
-                target_dir = CUSTOMER_DOCS_DIR / doc_type_slug
-                target_dir.mkdir(parents=True, exist_ok=True)
-                saved = 0
-                uploader_id = current_user_id()
-                for idx, uploaded in enumerate(upload_files, start=1):
-                    if uploaded is None:
-                        continue
-                    original_name = uploaded.name or f"{doc_type_slug}_{idx}.pdf"
-                    safe_original = Path(original_name).name
-                    filename = f"{doc_type_slug}_{selected_customer}_{idx}_{safe_original}"
-                    saved_path = save_uploaded_file(
-                        uploaded,
-                        target_dir,
-                        filename=filename,
-                        allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                        default_extension=".pdf",
-                    )
-                    if not saved_path:
-                        continue
-                    try:
-                        stored_path = str(saved_path.relative_to(BASE_DIR))
-                    except ValueError:
-                        stored_path = str(saved_path)
-                    conn.execute(
-                        """
-                        INSERT INTO customer_documents (
-                            customer_id, doc_type, file_path, original_name, uploaded_by
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            int(selected_customer),
-                            doc_type,
-                            stored_path,
-                            safe_original,
-                            uploader_id,
-                        ),
-                    )
-                    saved += 1
-                conn.commit()
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type=doc_type,
+                    upload_file=upload_file,
+                    details=details,
+                )
                 if saved:
-                    st.success(f"Uploaded {saved} document(s).")
+                    st.success("Document uploaded.")
                     _safe_rerun()
-                else:
-                    st.warning("No documents were uploaded.")
 
     docs_df = df_query(
         conn,
@@ -8588,200 +8861,6 @@ def customers_page(conn):
             st.warning(message)
         else:
             st.write(message)
-
-    with st.expander("Customer groups"):
-        st.caption(
-            "Create named customer groups so staff can quickly find and manage related accounts."
-        )
-        customer_options, customer_labels, _, _ = fetch_customer_choices(conn, only_complete=False)
-        customer_choices = [cid for cid in customer_options if cid is not None]
-        groups_df = df_query(
-            conn,
-            """
-            SELECT g.group_id,
-                   g.name,
-                   g.updated_at,
-                   COUNT(m.customer_id) AS member_count
-            FROM customer_groups g
-            LEFT JOIN customer_group_members m ON m.group_id = g.group_id
-            GROUP BY g.group_id
-            ORDER BY LOWER(g.name) ASC
-            """,
-        )
-        group_options: list[int] = []
-        group_labels: dict[int, str] = {}
-        group_name_lookup: dict[int, str] = {}
-        if not groups_df.empty:
-            for _, row in groups_df.iterrows():
-                group_id = int(row.get("group_id"))
-                group_name = clean_text(row.get("name")) or f"Group #{group_id}"
-                count = int(row.get("member_count") or 0)
-                group_options.append(group_id)
-                group_labels[group_id] = f"{group_name} ({count})"
-                group_name_lookup[group_id] = group_name
-
-        mode = st.radio(
-            "Group action",
-            ["Create new group", "Edit existing group"],
-            horizontal=True,
-            key="customer_group_mode",
-        )
-        selected_group = None
-        if mode == "Edit existing group":
-            if not group_options:
-                st.info("No groups created yet. Use 'Create new group' to add one.")
-            else:
-                selected_group = st.selectbox(
-                    "Select group to edit",
-                    options=group_options,
-                    format_func=lambda gid: group_labels.get(gid, f"Group #{gid}"),
-                    key="customer_group_selector",
-                )
-
-        form_enabled = mode == "Create new group" or selected_group
-        if not form_enabled:
-            st.info("Select a group to edit, or switch to 'Create new group'.")
-        else:
-            member_ids: list[int] = []
-            if selected_group:
-                members_df = df_query(
-                    conn,
-                    "SELECT customer_id FROM customer_group_members WHERE group_id=?",
-                    (int(selected_group),),
-                )
-                if not members_df.empty:
-                    member_ids = [
-                        int(cid)
-                        for cid in members_df["customer_id"].dropna().astype(int).tolist()
-                    ]
-            default_name = group_name_lookup.get(int(selected_group)) if selected_group else ""
-            group_label = "Rename group" if selected_group else "Group name"
-            with st.form("customer_group_form"):
-                group_name = st.text_input(
-                    group_label,
-                    value=default_name,
-                    help="Use a clear name (e.g., Hospital clients, VIPs, Dhaka West).",
-                )
-                selected_members = st.multiselect(
-                    "Customers in this group",
-                    options=customer_choices,
-                    default=member_ids,
-                    format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
-                )
-                save_group = st.form_submit_button("Save group", type="primary")
-            if save_group:
-                group_name_clean = clean_text(group_name)
-                if not group_name_clean:
-                    st.error("Group name is required.")
-                else:
-                    cursor = conn.cursor()
-                    if selected_group:
-                        cursor.execute(
-                            """
-                            UPDATE customer_groups
-                               SET name=?, updated_at=datetime('now')
-                             WHERE group_id=?
-                            """,
-                            (group_name_clean, int(selected_group)),
-                        )
-                        group_id = int(selected_group)
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO customer_groups (name, created_by, updated_at)
-                            VALUES (?, ?, datetime('now'))
-                            """,
-                            (group_name_clean, current_user_id()),
-                        )
-                        group_id = int(cursor.lastrowid)
-                    cursor.execute(
-                        "DELETE FROM customer_group_members WHERE group_id=?",
-                        (group_id,),
-                    )
-                    for cid in selected_members:
-                        if cid is None:
-                            continue
-                        cursor.execute(
-                            """
-                            INSERT OR IGNORE INTO customer_group_members (group_id, customer_id)
-                            VALUES (?, ?)
-                            """,
-                            (group_id, int(cid)),
-                        )
-                    conn.commit()
-                    st.success("Customer group saved.")
-                    _safe_rerun()
-        if selected_group:
-            delete_confirm = st.checkbox(
-                "I understand this group will be deleted.",
-                key="customer_group_delete_confirm",
-            )
-            if st.button(
-                "Delete group",
-                type="secondary",
-                disabled=not delete_confirm,
-                key="customer_group_delete_button",
-            ):
-                conn.execute(
-                    "DELETE FROM customer_groups WHERE group_id=?",
-                    (int(selected_group),),
-                )
-                conn.commit()
-                st.warning("Customer group deleted.")
-                _safe_rerun()
-
-        st.markdown("#### Group overview")
-        if groups_df.empty:
-            st.caption("No customer groups yet.")
-        else:
-            overview_df = groups_df.copy()
-            overview_df["updated_at"] = pd.to_datetime(
-                overview_df["updated_at"], errors="coerce"
-            ).dt.strftime("%d-%m-%Y %H:%M").fillna("")
-            st.dataframe(
-                overview_df.rename(
-                    columns={
-                        "group_id": "Group ID",
-                        "name": "Group name",
-                        "member_count": "Members",
-                        "updated_at": "Last updated",
-                    }
-                ),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-        if selected_group:
-            members_detail = df_query(
-                conn,
-                """
-                SELECT c.customer_id,
-                       COALESCE(c.name, c.company_name, '(unknown)') AS customer,
-                       c.phone,
-                       c.address
-                FROM customer_group_members m
-                LEFT JOIN customers c ON c.customer_id = m.customer_id
-                WHERE m.group_id=?
-                ORDER BY LOWER(customer) ASC
-                """,
-                (int(selected_group),),
-            )
-            st.markdown("#### Group members")
-            if members_detail.empty:
-                st.caption("No customers in this group yet.")
-            else:
-                st.dataframe(
-                    members_detail.rename(
-                        columns={
-                            "customer_id": "Customer ID",
-                            "customer": "Customer",
-                            "phone": "Phone",
-                            "address": "Address",
-                        }
-                    ),
-                    hide_index=True,
-                    use_container_width=True,
-                )
 
     with st.expander("Add new customer"):
         products_state = st.session_state.get(
@@ -12484,7 +12563,9 @@ def _render_quotation_management(conn):
         return None
 
     quotes_df = quotes_df.copy()
-    quotes_df["status"] = quotes_df["status"].apply(lambda val: clean_text(val) or "pending")
+    quotes_df["status"] = quotes_df["status"].apply(
+        lambda val: clean_text(val).lower() or "due"
+    )
     quotes_df["follow_up_date"] = quotes_df.get("follow_up_date", pd.Series(dtype=object)).apply(
         _as_editable_date
     )
@@ -12496,14 +12577,20 @@ def _render_quotation_management(conn):
         lambda value: format_money(value) or f"{_coerce_float(value, 0.0):,.2f}"
     )
 
-    tracker_source = quotes_df.drop(columns=["items_payload"], errors="ignore")
+    tracker_source = quotes_df.drop(
+        columns=["items_payload", "follow_up_status"],
+        errors="ignore",
+    )
     if "products" in tracker_source.columns and "customer_company" in tracker_source.columns:
         columns = list(tracker_source.columns)
         columns.remove("products")
         insert_at = columns.index("customer_company") + 1
         columns.insert(insert_at, "products")
         tracker_source = tracker_source[columns]
-    closed_statuses = {"paid", "rejected"}
+    closed_statuses = {"paid"}
+    tracker_source["status"] = tracker_source["status"].apply(
+        lambda val: clean_text(val).title() or "Due"
+    )
     locked_mask = tracker_source["status"].str.lower().isin(closed_statuses)
     editable_df = tracker_source[~locked_mask].copy()
     locked_df = tracker_source[locked_mask].copy()
@@ -12539,10 +12626,9 @@ def _render_quotation_management(conn):
     tracker_df = tracker_df.reindex(columns=editable_df.columns)
 
     edit_config = {
-        "status": st.column_config.TextColumn("Status", disabled=True),
-        "follow_up_status": st.column_config.TextColumn(
-            "Follow-up status",
-            help="Example: Possible, Hot, Cold, Closed",
+        "status": st.column_config.SelectboxColumn(
+            "Status",
+            options=["Due", "Advanced", "Paid"],
         ),
         "follow_up_notes": st.column_config.TextColumn("Follow-up notes"),
         "follow_up_date": st.column_config.DateColumn(
@@ -12565,7 +12651,7 @@ def _render_quotation_management(conn):
     }
 
     st.caption(
-        "Edit follow-up status, notes, and dates directly in the table, then press **Save quotation updates** to persist your changes."
+        "Edit status, follow-up notes, and dates directly in the table, then press **Save quotation updates** to persist your changes."
     )
 
     edited_records: list[dict[str, object]] = []
@@ -12589,7 +12675,12 @@ def _render_quotation_management(conn):
         key="quotation_tracker_save",
         disabled=save_disabled,
     ) and edited_records:
-        result = _update_quotation_records(conn, edited_records)
+        sanitized_records: list[dict[str, object]] = []
+        for record in edited_records:
+            sanitized = dict(record)
+            sanitized["status"] = clean_text(record.get("status")).lower() or "due"
+            sanitized_records.append(sanitized)
+        result = _update_quotation_records(conn, sanitized_records)
         updated_count = len(result.get("updated", []))
         locked_count = len(result.get("locked", []))
         if updated_count:
@@ -12601,7 +12692,7 @@ def _render_quotation_management(conn):
     st.markdown("#### Status updates with receipt")
     status_candidates = editable_df.to_dict("records") if not editable_df.empty else []
     if not status_candidates:
-        st.caption("All tracked quotations are already marked as paid or rejected.")
+        st.caption("All tracked quotations are already marked as paid.")
     else:
         status_labels: dict[int, str] = {}
         for record in status_candidates:
@@ -12622,18 +12713,19 @@ def _render_quotation_management(conn):
             key="quotation_status_update_id",
         )
         selected_record = next((row for row in status_candidates if int(row.get("quotation_id")) == int(selected_id)), {})
-        current_status = clean_text(selected_record.get("status")) or "pending"
+        current_status = clean_text(selected_record.get("status")).lower() or "due"
         new_status = st.selectbox(
             "New status",
-            ["pending", "paid", "rejected"],
-            index=["pending", "paid", "rejected"].index(current_status)
-            if current_status in {"pending", "paid", "rejected"}
+            ["Due", "Advanced", "Paid"],
+            index=["due", "advanced", "paid"].index(current_status)
+            if current_status in {"due", "advanced", "paid"}
             else 0,
             key="quotation_status_update_choice",
         )
+        new_status_value = new_status.lower()
         receipt_upload = None
         existing_receipt = clean_text(selected_record.get("payment_receipt_path"))
-        if new_status == "paid":
+        if new_status_value == "paid":
             receipt_upload = st.file_uploader(
                 "Upload payment receipt (required when marking as paid)",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
@@ -12646,10 +12738,10 @@ def _render_quotation_management(conn):
             if current_status in closed_statuses:
                 st.warning("This quotation is locked and cannot be changed.")
                 return
-            if new_status == current_status:
+            if new_status_value == current_status:
                 st.info("No changes to apply.")
                 return
-            if new_status == "paid" and not (receipt_upload or existing_receipt):
+            if new_status_value == "paid" and not (receipt_upload or existing_receipt):
                 st.error("Upload a receipt before marking the quotation as paid.")
                 return
             safe_ref = _sanitize_path_component(clean_text(selected_record.get("reference")) or f"quotation_{selected_id}")
@@ -12664,7 +12756,7 @@ def _render_quotation_management(conn):
                 [
                     {
                         "quotation_id": selected_id,
-                        "status": new_status,
+                        "status": new_status_value,
                         "payment_receipt_path": receipt_path,
                     }
                 ],
@@ -12676,7 +12768,7 @@ def _render_quotation_management(conn):
                 st.info("This quotation was already locked and was not changed.")
 
     if not locked_df.empty:
-        st.markdown("#### Paid / rejected quotations (locked)")
+        st.markdown("#### Paid quotations (locked)")
         locked_df = locked_df.rename(
             columns={
                 "payment_receipt_path": "receipt_path",
@@ -12722,7 +12814,7 @@ def _render_quotation_management(conn):
     selected_row = quotes_df[
         quotes_df["quotation_id"] == selected_detail_id
     ].iloc[0]
-    selected_status = clean_text(selected_row.get("status")) or "pending"
+    selected_status = clean_text(selected_row.get("status")).lower() or "due"
     existing_receipt = clean_text(selected_row.get("payment_receipt_path"))
     follow_up_status_value = clean_text(selected_row.get("follow_up_status")) or ""
     follow_up_notes_value = clean_text(selected_row.get("follow_up_notes")) or ""
@@ -14472,9 +14564,10 @@ def operations_page(conn):
         "Delivery orders, work done, service, and maintenance share one workspace. "
         "Choose the record type to manage."
     )
-    render_customer_quick_edit_section(
-        conn, key_prefix="operations_customers", include_leads=False
-    )
+    with st.expander("Customer quick edit", expanded=False):
+        render_customer_quick_edit_section(
+            conn, key_prefix="operations_customers", include_leads=False, show_id=False
+        )
     st.markdown("---")
     record_options = {
         "Delivery orders": ("Delivery order", "delivery_order"),
@@ -15226,10 +15319,10 @@ def customer_summary_page(conn):
         if zip_buffer is not None:
             archive_title = _sanitize_path_component(info.get("name") or blank_label)
             st.download_button(
-                "⬇️ Download all documents (.zip)",
+                "⬇️ Download all documents (.rar)",
                 data=zip_buffer.getvalue(),
-                file_name=f"{archive_title}_documents.zip",
-                mime="application/zip",
+                file_name=f"{archive_title}_documents.rar",
+                mime="application/x-rar-compressed",
                 key="cust_docs_zip",
             )
 
@@ -15255,10 +15348,10 @@ def customer_summary_page(conn):
     if package_buffer is not None:
         archive_name = _sanitize_path_component(info.get("name") or blank_label)
         download_cols[1].download_button(
-            "⬇️ Download full customer package (.zip)",
+            "⬇️ Download full customer package (.rar)",
             data=package_buffer.getvalue(),
-            file_name=f"{archive_name}_full_package.zip",
-            mime="application/zip",
+            file_name=f"{archive_name}_full_package.rar",
+            mime="application/x-rar-compressed",
             key="cust_full_package",
         )
 
