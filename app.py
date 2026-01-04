@@ -5627,14 +5627,12 @@ def init_ui():
     if "user" not in st.session_state:
         st.session_state.user = None
     if st.session_state.user:
-        st.set_option("client.toolbarMode", "viewer")
+        st.set_option("client.toolbarMode", "auto")
         st.title("PS Engineering – Business Suites")
         st.caption("Customers • Warranties • Needs • Summaries")
         st.markdown(
             """
             <style>
-            #MainMenu,
-            div[data-testid="stToolbar"],
             div[data-testid="stStatusWidget"],
             div[data-testid="stDecoration"] {
                 display: none !important;
