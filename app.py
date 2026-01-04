@@ -194,7 +194,15 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
         ("contact", {"label": "Contact", "type": "text"}),
         ("product_detail", {"label": "Product Detail", "type": "text"}),
         ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
-        ("status", {"label": "Status", "type": "text"}),
+        (
+            "status",
+            {
+                "label": "Status",
+                "type": "select",
+                "options": ["Pending", "Paid"],
+                "help": "Track whether the follow-up is paid or still pending.",
+            },
+        ),
         ("notes", {"label": "Notes", "type": "text"}),
         ("person_in_charge", {"label": "Person In Charge", "type": "text"}),
     ]
@@ -310,7 +318,7 @@ def _normalize_grid_rows(
         entry: dict[str, object] = {}
         for key, config in fields.items():
             value = raw.get(key)
-            if config["type"] == "text":
+            if config["type"] in {"text", "select"}:
                 entry[key] = clean_text(value)
             elif config["type"] == "number":
                 entry[key] = _coerce_grid_number(value)
@@ -592,6 +600,12 @@ def _build_report_column_config(
                 label,
                 help=help_text,
                 format=config.get("format", "DD-MM-YYYY"),
+            )
+        elif config.get("type") == "select":
+            column_config[key] = st.column_config.SelectboxColumn(
+                label,
+                options=config.get("options") or [],
+                help=help_text,
             )
         else:
             column_config[key] = st.column_config.TextColumn(label, help=help_text)
@@ -5574,7 +5588,6 @@ def init_ui():
             """
             <style>
             #MainMenu,
-            header,
             div[data-testid="stToolbar"],
             div[data-testid="stStatusWidget"],
             div[data-testid="stDecoration"] {
@@ -7133,6 +7146,45 @@ def dashboard(conn):
                     formatted_deleted[preview_cols],
                     use_container_width=True,
                 )
+
+            deleted_ops = df_query(
+                conn,
+                """
+                SELECT d.do_number,
+                       COALESCE(d.record_type, 'delivery_order') AS record_type,
+                       COALESCE(c.name, '(unknown)') AS customer,
+                       d.description,
+                       d.file_path,
+                       d.payment_receipt_path,
+                       d.deleted_at,
+                       d.deleted_by,
+                       u.username AS deleted_by_name
+                FROM delivery_orders d
+                LEFT JOIN customers c ON c.customer_id = d.customer_id
+                LEFT JOIN users u ON u.user_id = d.deleted_by
+                WHERE d.deleted_at IS NOT NULL
+                ORDER BY datetime(d.deleted_at) DESC
+                """,
+            )
+            if deleted_ops.empty:
+                st.caption("No deleted delivery/work done records found.")
+            else:
+                formatted_ops = fmt_dates(deleted_ops, ["deleted_at"])
+                st.markdown("#### Deleted delivery/work done records")
+                ops_bytes = io.BytesIO()
+                with pd.ExcelWriter(ops_bytes, engine="openpyxl") as writer:
+                    formatted_ops.to_excel(
+                        writer, index=False, sheet_name="deleted_operations"
+                    )
+                ops_bytes.seek(0)
+                st.download_button(
+                    "Download deleted delivery/work done",
+                    ops_bytes.getvalue(),
+                    file_name="deleted_delivery_work_done.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="deleted_ops_dl",
+                )
+                st.dataframe(formatted_ops, use_container_width=True)
 
     st.markdown("---")
     st.subheader("🔎 Quick snapshots")
@@ -8910,9 +8962,10 @@ def customers_page(conn):
                     )
                     do_status = st.selectbox(
                         "Delivery order status",
-                        options=["pending", "paid"],
+                        options=DELIVERY_STATUS_OPTIONS,
                         key="new_customer_do_status",
                         help="Mark as paid to require an accompanying receipt.",
+                        format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
                     )
                     st.file_uploader(
                         "Delivery order receipt (required if paid)",
@@ -8933,9 +8986,10 @@ def customers_page(conn):
                         )
                     work_done_status = work_done_cols[1].selectbox(
                         "Work done status",
-                        options=["pending", "paid"],
+                        options=DELIVERY_STATUS_OPTIONS,
                         key="new_customer_work_done_status",
                         help="Mark as paid to require an accompanying receipt.",
+                        format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
                     )
                     work_done_pdf = work_done_cols[2].file_uploader(
                         "Attach work done PDF",
@@ -8953,7 +9007,7 @@ def customers_page(conn):
                         key="new_customer_work_done_notes",
                     )
                 else:
-                    work_done_status = st.session_state.get("new_customer_work_done_status", "pending")
+                    work_done_status = st.session_state.get("new_customer_work_done_status", "due")
                     work_done_pdf = st.session_state.get("new_customer_work_done_pdf")
                     work_done_receipt = st.session_state.get("new_customer_work_done_receipt")
                     work_done_notes = st.session_state.get("new_customer_work_done_notes")
@@ -9075,10 +9129,8 @@ def customers_page(conn):
                 delivery_items_payload = None
                 delivery_total = 0.0
                 do_status_value = (
-                    clean_text(st.session_state.get("new_customer_do_status")) or "pending"
+                    normalize_delivery_status(st.session_state.get("new_customer_do_status"))
                 )
-                if do_status_value not in {"pending", "paid"}:
-                    do_status_value = "pending"
                 if product_items:
                     normalized_items, delivery_total = normalize_delivery_items(product_items)
                     if normalized_items:
@@ -9292,9 +9344,7 @@ def customers_page(conn):
                                     filename=f"work_done_{safe_name}.pdf",
                                 )
                             work_done_saved = False
-                            work_done_status_value = clean_text(work_done_status) or "pending"
-                            if work_done_status_value not in {"pending", "paid"}:
-                                work_done_status_value = "pending"
+                            work_done_status_value = normalize_delivery_status(work_done_status)
                             work_done_receipt_path = None
                             if work_done_status_value == "paid":
                                 work_done_receipt_path = store_payment_receipt(
@@ -11956,12 +12006,6 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 value=st.session_state.get("quotation_customer_contact", ""),
                 key="quotation_customer_contact",
             )
-            attention_name = st.text_input(
-                "Attention line (optional)",
-                value=st.session_state.get("quotation_attention_name", "")
-                or st.session_state.get("quotation_customer_contact_name", ""),
-                key="quotation_attention_name",
-            )
 
         customer_address = st.text_area(
             "Delivery location / address",
@@ -12125,7 +12169,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
     salutation = st.session_state.get("quotation_salutation", "")
     intro_text = st.session_state.get("quotation_introduction", "")
     closing_text = st.session_state.get("quotation_closing", "")
-    attention_name = st.session_state.get("quotation_attention_name", attention_name)
+    attention_name = clean_text(customer_contact_name)
     if reset:
         _reset_quotation_form_state()
         st.session_state["quotation_feedback"] = (
@@ -13724,11 +13768,29 @@ def _reset_delivery_order_form_state() -> None:
     st.session_state["delivery_order_number"] = ""
     st.session_state["delivery_order_customer"] = None
     st.session_state["delivery_order_description"] = ""
-    st.session_state["delivery_order_sales_person"] = ""
     st.session_state["delivery_order_remarks"] = ""
-    st.session_state["delivery_order_status"] = "pending"
+    st.session_state["delivery_order_status"] = "due"
     for key in ("do_form_loader", "delivery_order_items_editor"):
         st.session_state.pop(key, None)
+
+
+DELIVERY_STATUS_OPTIONS = ["due", "advanced", "paid"]
+DELIVERY_STATUS_LABELS = {
+    "due": "Due",
+    "advanced": "Advanced",
+    "paid": "Paid",
+}
+
+
+def normalize_delivery_status(value: Optional[str]) -> str:
+    normalized = clean_text(value).lower()
+    if normalized in DELIVERY_STATUS_OPTIONS:
+        return normalized
+    if normalized in {"pending", "rejected", "overdue"}:
+        return "due"
+    if normalized in {"advance", "advanced_payment"}:
+        return "advanced"
+    return "due"
 
 
 def delivery_orders_page(
@@ -13749,9 +13811,8 @@ def delivery_orders_page(
     st.session_state.setdefault("delivery_order_number", "")
     st.session_state.setdefault("delivery_order_customer", None)
     st.session_state.setdefault("delivery_order_description", "")
-    st.session_state.setdefault("delivery_order_sales_person", "")
     st.session_state.setdefault("delivery_order_remarks", "")
-    st.session_state.setdefault("delivery_order_status", "pending")
+    st.session_state.setdefault("delivery_order_status", "due")
     autofill_customer_key = f"{record_type_key}_autofill_customer"
     st.session_state.setdefault(autofill_customer_key, None)
 
@@ -13813,7 +13874,7 @@ def delivery_orders_page(
             load_choices.append(do_num)
             load_labels[do_num] = f"{do_num} • {customer_name}"
 
-    closed_statuses = {"paid", "rejected"}
+    closed_statuses = {"paid"}
     current_receipt_path: Optional[str] = None
 
     st.markdown(f"### Create or update a {record_label_lower}")
@@ -13832,9 +13893,8 @@ def delivery_orders_page(
             cust_id = row.get("customer_id")
             st.session_state["delivery_order_customer"] = int(cust_id) if pd.notna(cust_id) else None
             st.session_state["delivery_order_description"] = clean_text(row.get("description")) or ""
-            st.session_state["delivery_order_sales_person"] = clean_text(row.get("sales_person")) or ""
             st.session_state["delivery_order_remarks"] = clean_text(row.get("remarks")) or ""
-            st.session_state["delivery_order_status"] = clean_text(row.get("status")) or "pending"
+            st.session_state["delivery_order_status"] = normalize_delivery_status(row.get("status"))
             current_receipt_path = clean_text(row.get("payment_receipt_path"))
             loaded_items = parse_delivery_items_payload(row.get("items_payload"))
             st.session_state["delivery_order_items_rows"] = loaded_items or _default_delivery_items()
@@ -13878,11 +13938,6 @@ def delivery_orders_page(
             value=st.session_state.get("delivery_order_description", ""),
             key="delivery_order_description",
         )
-        sales_person = st.text_input(
-            "Sales person / owner",
-            value=st.session_state.get("delivery_order_sales_person", ""),
-            key="delivery_order_sales_person",
-        )
         remarks = st.text_area(
             "Remarks",
             value=st.session_state.get("delivery_order_remarks", ""),
@@ -13890,12 +13945,12 @@ def delivery_orders_page(
         )
         status_value = st.selectbox(
             "Status",
-            ["pending", "paid", "rejected"],
-            index=["pending", "paid", "rejected"].index(
-                clean_text(st.session_state.get("delivery_order_status"))
-                or "pending"
+            DELIVERY_STATUS_OPTIONS,
+            index=DELIVERY_STATUS_OPTIONS.index(
+                normalize_delivery_status(st.session_state.get("delivery_order_status"))
             ),
-            help="Paid or rejected delivery orders are locked against further edits.",
+            format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
+            help="Paid delivery orders are locked against further edits.",
             disabled=(clean_text(st.session_state.get("delivery_order_status")) or "").lower()
             in closed_statuses,
             key="delivery_order_status",
@@ -13954,6 +14009,7 @@ def delivery_orders_page(
         submit = st.form_submit_button(f"Save {record_label_lower}", type="primary")
 
     if submit:
+        sales_person = clean_text(get_current_user().get("username"))
         cleaned_number = clean_text(do_number)
         if not cleaned_number:
             st.error(f"{record_label} number is required.")
@@ -13976,12 +14032,12 @@ def delivery_orders_page(
                 (cleaned_number, record_type_key),
             )
             stored_path = None
-            existing_status = "pending"
+            existing_status = "due"
             existing_receipt = None
             existing_deleted_at = None
             if not existing.empty:
                 stored_path = clean_text(existing.iloc[0].get("file_path"))
-                existing_status = clean_text(existing.iloc[0].get("status")) or "pending"
+                existing_status = normalize_delivery_status(existing.iloc[0].get("status"))
                 existing_receipt = clean_text(existing.iloc[0].get("payment_receipt_path"))
                 existing_deleted_at = clean_text(existing.iloc[0].get("deleted_at"))
             locked_record = existing_status.lower() in closed_statuses
@@ -14055,7 +14111,7 @@ def delivery_orders_page(
                         items_payload,
                         total_amount_value,
                         creator_id,
-                        clean_text(status_value) or "pending",
+                        normalize_delivery_status(status_value),
                         receipt_path,
                         record_type_key,
                     ),
@@ -14076,7 +14132,7 @@ def delivery_orders_page(
                         stored_path,
                         items_payload,
                         total_amount_value,
-                        clean_text(status_value) or existing_status,
+                        normalize_delivery_status(status_value) or existing_status,
                         receipt_path,
                         creator_id,
                         record_type_key,
@@ -14120,7 +14176,7 @@ def delivery_orders_page(
 
     number_label = f"{record_label} number"
     st.markdown(f"### {record_label} search")
-    filter_cols = st.columns((1.2, 1, 1, 1))
+    filter_cols = st.columns((1.4, 1.0, 1.0))
     with filter_cols[0]:
         query_text = st.text_input(
             f"Search by {record_label.lower()} number, description or remarks",
@@ -14134,8 +14190,6 @@ def delivery_orders_page(
             key="do_filter_customer",
         )
     with filter_cols[2]:
-        sales_filter = st.text_input("Sales person filter", key="do_filter_sales")
-    with filter_cols[3]:
         use_date_filter = st.checkbox("Filter by created date", key="do_filter_date_toggle")
     date_range = None
     if use_date_filter:
@@ -14189,13 +14243,6 @@ def delivery_orders_page(
             ]
         if customer_filter:
             do_df = do_df[do_df["customer_id"] == int(customer_filter)]
-        if sales_filter:
-            sales_needle = sales_filter.lower()
-            do_df = do_df[
-                do_df["sales_person"].apply(
-                    lambda value: sales_needle in str(value).lower() if pd.notna(value) else False
-                )
-            ]
         if use_date_filter and isinstance(date_range, (list, tuple)) and len(date_range) == 2:
             start_date, end_date = date_range
             start_iso = to_iso_date(start_date)
@@ -14208,7 +14255,9 @@ def delivery_orders_page(
                 ]
         do_df["Document"] = do_df["file_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
         do_df["Receipt"] = do_df["payment_receipt_path"].apply(lambda fp: "📎" if clean_text(fp) else "")
-        do_df["status"] = do_df["status"].apply(lambda s: (clean_text(s) or "pending").title())
+        do_df["status"] = do_df["status"].apply(
+            lambda s: DELIVERY_STATUS_LABELS.get(normalize_delivery_status(s), "Due")
+        )
         if "total_amount" in do_df.columns:
             def _format_total_value(value: object) -> str:
                 if value is None:
@@ -14222,16 +14271,15 @@ def delivery_orders_page(
 
             do_df["total_amount"] = do_df["total_amount"].apply(_format_total_value)
         st.markdown(f"#### {record_label} records")
-        header_cols = st.columns((1.2, 1.4, 2.2, 1.0, 0.9, 1.1, 0.7, 0.7, 1.5))
+        header_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.5))
         header_cols[0].write(f"**{number_label}**")
         header_cols[1].write("**Customer**")
         header_cols[2].write("**Description**")
         header_cols[3].write("**Total**")
         header_cols[4].write("**Status**")
-        header_cols[5].write("**Created**")
-        header_cols[6].write("**Attachment**")
-        header_cols[7].write("**Receipt**")
-        header_cols[8].write("**Upload doc**")
+        header_cols[5].write("**Attachment**")
+        header_cols[6].write("**Receipt**")
+        header_cols[7].write("**Upload doc**")
 
         for _, row in do_df.iterrows():
             do_number = clean_text(row.get("do_number"))
@@ -14239,22 +14287,21 @@ def delivery_orders_page(
                 continue
             row_key = f"{record_type_key}_{do_number}"
             with st.form(f"do_upload_row_{row_key}"):
-                row_cols = st.columns((1.2, 1.4, 2.2, 1.0, 0.9, 1.1, 0.7, 0.7, 1.5))
+                row_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.5))
                 row_cols[0].write(do_number)
                 row_cols[1].write(clean_text(row.get("customer")) or "(unknown)")
                 row_cols[2].write(clean_text(row.get("description")) or "")
                 row_cols[3].write(clean_text(row.get("total_amount")) or "")
                 row_cols[4].write(clean_text(row.get("status")) or "")
-                row_cols[5].write(clean_text(row.get("created_at")) or "")
-                row_cols[6].write(clean_text(row.get("Document")) or "")
-                row_cols[7].write(clean_text(row.get("Receipt")) or "")
-                upload_doc = row_cols[8].file_uploader(
+                row_cols[5].write(clean_text(row.get("Document")) or "")
+                row_cols[6].write(clean_text(row.get("Receipt")) or "")
+                upload_doc = row_cols[7].file_uploader(
                     "Upload document",
                     type=["pdf"],
                     label_visibility="collapsed",
                     key=f"do_row_doc_upload_{row_key}",
                 )
-                save_doc = row_cols[8].form_submit_button("Save", type="secondary")
+                save_doc = row_cols[7].form_submit_button("Save", type="secondary")
                 if save_doc:
                     if upload_doc is None:
                         st.warning("Select a PDF to upload.")
@@ -14350,6 +14397,17 @@ def delivery_orders_page(
         disabled=not confirm_delete,
         key=f"{record_label_lower}_delete_button",
     ):
+        delete_row = deletable_df[
+            deletable_df["do_number"].apply(lambda val: clean_text(val) == selected_delete)
+        ]
+        delete_info = {}
+        if not delete_row.empty:
+            delete_info = delete_row.iloc[0].to_dict()
+        attachment_path = clean_text(delete_info.get("file_path"))
+        receipt_path = clean_text(delete_info.get("payment_receipt_path"))
+        description_text = clean_text(delete_info.get("description"))
+        total_amount = clean_text(delete_info.get("total_amount"))
+        deleted_by_label = clean_text(delete_info.get("created_by_name")) or "(staff)"
         conn.execute(
             """
             UPDATE delivery_orders
@@ -14361,7 +14419,19 @@ def delivery_orders_page(
             (actor_id, selected_delete, record_type_key),
         )
         conn.commit()
-        description = f"{record_label} {selected_delete} deleted"
+        detail_parts = [
+            f"{record_label} {selected_delete} deleted",
+            f"by {deleted_by_label}",
+        ]
+        if description_text:
+            detail_parts.append(f"desc: {description_text}")
+        if total_amount:
+            detail_parts.append(f"total: {total_amount}")
+        if attachment_path:
+            detail_parts.append(f"doc: {attachment_path}")
+        if receipt_path:
+            detail_parts.append(f"receipt: {receipt_path}")
+        description = " | ".join(detail_parts)
         log_activity(
             conn,
             event_type=f"{record_type_key}_deleted",
@@ -15870,11 +15940,16 @@ def duplicates_page(conn):
         SELECT
             c.customer_id as id,
             c.name,
+            c.company_name,
             c.phone,
             c.address,
+            c.delivery_address,
+            c.remarks,
             c.purchase_date,
             c.product_info,
             c.delivery_order_code,
+            c.sales_person,
+            c.amount_spent,
             c.dup_flag,
             c.created_at
         FROM customers c
@@ -15913,16 +15988,35 @@ def duplicates_page(conn):
             purchase_date_fmt=pd.to_datetime(editor_df["purchase_date"], errors="coerce").dt.strftime(DATE_FMT),
             created_at_fmt=pd.to_datetime(editor_df["created_at"], errors="coerce").dt.strftime("%d-%m-%Y %H:%M"),
         )
+        if "amount_spent" in preview_df.columns:
+            def _format_amount_cell(val: object) -> str:
+                if val in (None, ""):
+                    return ""
+                try:
+                    if pd.isna(val):
+                        return ""
+                except Exception:
+                    pass
+                return format_money(val) or f"{_coerce_float(val, 0.0):,.2f}"
+
+            preview_df["amount_spent_fmt"] = preview_df["amount_spent"].apply(
+                _format_amount_cell
+            )
         preview_cols = [
             col
             for col in [
                 "__group_key",
                 "name",
+                "company_name",
                 "phone",
                 "address",
+                "delivery_address",
+                "remarks",
                 "purchase_date_fmt",
                 "product_info",
                 "delivery_order_code",
+                "sales_person",
+                "amount_spent_fmt",
                 "duplicate",
                 "created_at_fmt",
             ]
@@ -15934,9 +16028,14 @@ def duplicates_page(conn):
                 .rename(
                     columns={
                         "__group_key": "Duplicate set",
+                        "company_name": "Company",
                         "purchase_date_fmt": "Purchase date",
                         "product_info": "Product",
                         "delivery_order_code": "DO code",
+                        "delivery_address": "Delivery address",
+                        "remarks": "Remarks",
+                        "sales_person": "Sales person",
+                        "amount_spent_fmt": "Amount spent",
                         "created_at_fmt": "Created",
                     }
                 )
@@ -16032,40 +16131,83 @@ def duplicates_page(conn):
                 "Maintenance",
                 "Other",
             ]
-            header_cols = st.columns((0.6, 1.4, 1.2, 1.8, 1.1, 1.6, 1.1, 1.0, 1.3, 1.3, 1.3, 1.0))
+            header_cols = st.columns(
+                (
+                    0.6,
+                    1.2,
+                    1.2,
+                    1.1,
+                    1.5,
+                    1.5,
+                    1.3,
+                    1.2,
+                    1.1,
+                    1.5,
+                    1.1,
+                    1.1,
+                    0.9,
+                    1.1,
+                    1.1,
+                    0.9,
+                )
+            )
             header_cols[0].write("**ID**")
             header_cols[1].write("**Name**")
-            header_cols[2].write("**Phone**")
-            header_cols[3].write("**Address**")
-            header_cols[4].write("**Purchase date**")
-            header_cols[5].write("**Product**")
-            header_cols[6].write("**DO code**")
-            header_cols[7].write("**Duplicate**")
-            header_cols[8].write("**File type**")
-            header_cols[9].write("**➕ Upload**")
-            header_cols[10].write("**Created**")
-            header_cols[11].write("**Action**")
+            header_cols[2].write("**Company**")
+            header_cols[3].write("**Phone**")
+            header_cols[4].write("**Address**")
+            header_cols[5].write("**Delivery address**")
+            header_cols[6].write("**Remarks**")
+            header_cols[7].write("**Sales person**")
+            header_cols[8].write("**Purchase date**")
+            header_cols[9].write("**Product**")
+            header_cols[10].write("**DO code**")
+            header_cols[11].write("**Amount**")
+            header_cols[12].write("**Duplicate**")
+            header_cols[13].write("**File type**")
+            header_cols[14].write("**➕ Upload**")
+            header_cols[15].write("**Action**")
             editor_rows = []
             for _, row in editor_df.iterrows():
                 cid = int_or_none(row.get("id"))
                 if cid is None:
                     continue
-                row_cols = st.columns((0.6, 1.4, 1.2, 1.8, 1.1, 1.6, 1.1, 1.0, 1.3, 1.3, 1.3, 1.0))
+                row_cols = st.columns(
+                    (
+                        0.6,
+                        1.2,
+                        1.2,
+                        1.1,
+                        1.5,
+                        1.5,
+                        1.3,
+                        1.2,
+                        1.1,
+                        1.5,
+                        1.1,
+                        1.1,
+                        0.9,
+                        1.1,
+                        1.1,
+                        0.9,
+                    )
+                )
                 row_cols[0].write(cid)
                 name_key = f"dup_name_{cid}"
+                company_key = f"dup_company_{cid}"
                 phone_key = f"dup_phone_{cid}"
                 address_key = f"dup_address_{cid}"
+                delivery_address_key = f"dup_delivery_address_{cid}"
+                remarks_key = f"dup_remarks_{cid}"
+                sales_key = f"dup_sales_{cid}"
                 purchase_key = f"dup_purchase_{cid}"
                 product_key = f"dup_product_{cid}"
                 do_key = f"dup_do_{cid}"
+                amount_key = f"dup_amount_{cid}"
                 file_type_key = f"dup_file_type_{cid}"
                 upload_key = f"dup_upload_{cid}"
                 upload_btn_key = f"dup_upload_btn_{cid}"
                 action_key = f"dup_action_{cid}"
-                created_at = row.get("created_at")
-                created_label = ""
-                if isinstance(created_at, (datetime, pd.Timestamp)) and not pd.isna(created_at):
-                    created_label = created_at.strftime("%d-%m-%Y %H:%M")
                 purchase_date_value = row.get("purchase_date")
                 purchase_date_label = ""
                 if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
@@ -16077,49 +16219,79 @@ def duplicates_page(conn):
                     label_visibility="collapsed",
                 )
                 row_cols[2].text_input(
+                    "Company",
+                    value=clean_text(row.get("company_name")) or "",
+                    key=company_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[3].text_input(
                     "Phone",
                     value=clean_text(row.get("phone")) or "",
                     key=phone_key,
                     label_visibility="collapsed",
                 )
-                row_cols[3].text_input(
+                row_cols[4].text_input(
                     "Address",
                     value=clean_text(row.get("address")) or "",
                     key=address_key,
                     label_visibility="collapsed",
                 )
-                row_cols[4].text_input(
+                row_cols[5].text_input(
+                    "Delivery address",
+                    value=clean_text(row.get("delivery_address")) or "",
+                    key=delivery_address_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[6].text_input(
+                    "Remarks",
+                    value=clean_text(row.get("remarks")) or "",
+                    key=remarks_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[7].text_input(
+                    "Sales person",
+                    value=clean_text(row.get("sales_person")) or "",
+                    key=sales_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[8].text_input(
                     "Purchase date",
                     value=purchase_date_label,
                     key=purchase_key,
                     label_visibility="collapsed",
                 )
-                row_cols[5].text_input(
+                row_cols[9].text_input(
                     "Product",
                     value=clean_text(row.get("product_info")) or "",
                     key=product_key,
                     label_visibility="collapsed",
                 )
-                row_cols[6].text_input(
+                row_cols[10].text_input(
                     "DO code",
                     value=clean_text(row.get("delivery_order_code")) or "",
                     key=do_key,
                     label_visibility="collapsed",
                 )
-                row_cols[7].write("🔁 duplicate phone")
-                row_cols[8].selectbox(
+                row_cols[11].text_input(
+                    "Amount",
+                    value=clean_text(row.get("amount_spent")) or "",
+                    key=amount_key,
+                    label_visibility="collapsed",
+                )
+                row_cols[12].write("🔁 duplicate phone")
+                row_cols[13].selectbox(
                     "File type",
                     options=doc_type_options,
                     key=file_type_key,
                     label_visibility="collapsed",
                 )
-                upload_file = row_cols[9].file_uploader(
+                upload_file = row_cols[14].file_uploader(
                     "Upload document",
                     type=["pdf", "png", "jpg", "jpeg", "webp"],
                     key=upload_key,
                     label_visibility="collapsed",
                 )
-                if row_cols[9].button("➕", key=upload_btn_key, help="Upload document"):
+                if row_cols[14].button("➕", key=upload_btn_key, help="Upload document"):
                     if upload_file is None:
                         st.warning("Select a file to upload.")
                     else:
@@ -16164,8 +16336,7 @@ def duplicates_page(conn):
                             _safe_rerun()
                         else:
                             st.error("Unable to save the uploaded file.")
-                row_cols[10].write(created_label or "-")
-                row_cols[11].selectbox(
+                row_cols[15].selectbox(
                     "Action",
                     options=["Keep", "Delete"],
                     key=action_key,
@@ -16175,11 +16346,16 @@ def duplicates_page(conn):
                     {
                         "id": cid,
                         "name": st.session_state.get(name_key),
+                        "company_name": st.session_state.get(company_key),
                         "phone": st.session_state.get(phone_key),
                         "address": st.session_state.get(address_key),
+                        "delivery_address": st.session_state.get(delivery_address_key),
+                        "remarks": st.session_state.get(remarks_key),
+                        "sales_person": st.session_state.get(sales_key),
                         "purchase_date": st.session_state.get(purchase_key),
                         "product_info": st.session_state.get(product_key),
                         "delivery_order_code": st.session_state.get(do_key),
+                        "amount_spent": st.session_state.get(amount_key),
                         "Action": st.session_state.get(action_key),
                     }
                 )
@@ -16210,36 +16386,71 @@ def duplicates_page(conn):
                                 errors.append(f"Only admins can delete customers (ID #{cid}).")
                             continue
                         new_name = clean_text(row.get("name"))
+                        new_company = clean_text(row.get("company_name"))
                         new_phone = clean_text(row.get("phone"))
                         new_address = clean_text(row.get("address"))
+                        new_delivery_address = clean_text(row.get("delivery_address"))
+                        new_remarks = clean_text(row.get("remarks"))
+                        new_sales_person = clean_text(row.get("sales_person"))
+                        new_amount = parse_amount(row.get("amount_spent"))
                         purchase_str, _ = date_strings_from_input(row.get("purchase_date"))
                         product_label = clean_text(row.get("product_info"))
                         new_do = clean_text(row.get("delivery_order_code"))
                         original_row = raw_map[cid]
                         old_name = clean_text(original_row.get("name"))
+                        old_company = clean_text(original_row.get("company_name"))
                         old_phone = clean_text(original_row.get("phone"))
                         old_address = clean_text(original_row.get("address"))
+                        old_delivery_address = clean_text(original_row.get("delivery_address"))
+                        old_remarks = clean_text(original_row.get("remarks"))
+                        old_sales_person = clean_text(original_row.get("sales_person"))
+                        old_amount = parse_amount(original_row.get("amount_spent"))
                         old_purchase = clean_text(original_row.get("purchase_date"))
                         old_product = clean_text(original_row.get("product_info"))
                         old_do = clean_text(original_row.get("delivery_order_code"))
                         if (
                             new_name == old_name
+                            and new_company == old_company
                             and new_phone == old_phone
                             and new_address == old_address
+                            and new_delivery_address == old_delivery_address
+                            and new_remarks == old_remarks
+                            and new_sales_person == old_sales_person
+                            and new_amount == old_amount
                             and purchase_str == old_purchase
                             and product_label == old_product
                             and new_do == old_do
                         ):
                             continue
                         conn.execute(
-                            "UPDATE customers SET name=?, phone=?, address=?, purchase_date=?, product_info=?, delivery_order_code=?, dup_flag=0 WHERE customer_id=?",
+                            """
+                            UPDATE customers
+                               SET name=?,
+                                   company_name=?,
+                                   phone=?,
+                                   address=?,
+                                   delivery_address=?,
+                                   remarks=?,
+                                   purchase_date=?,
+                                   product_info=?,
+                                   delivery_order_code=?,
+                                   sales_person=?,
+                                   amount_spent=?,
+                                   dup_flag=0
+                             WHERE customer_id=?
+                            """,
                             (
                                 new_name,
+                                new_company,
                                 new_phone,
                                 new_address,
+                                new_delivery_address,
+                                new_remarks,
                                 purchase_str,
                                 product_label,
                                 new_do,
+                                new_sales_person,
+                                new_amount,
                                 cid,
                             ),
                         )
@@ -16258,8 +16469,8 @@ def duplicates_page(conn):
                                     cid,
                                     None,
                                     product_label,
-                                    None,
-                                    None,
+                                    new_sales_person,
+                                    new_remarks,
                                     None,
                                 ),
                             )
@@ -16269,12 +16480,27 @@ def duplicates_page(conn):
                                 (old_do, cid),
                             )
                         conn.execute(
-                            "UPDATE import_history SET customer_name=?, phone=?, address=?, product_label=?, do_number=?, original_date=? WHERE customer_id=? AND deleted_at IS NULL",
+                            """
+                            UPDATE import_history
+                               SET customer_name=?,
+                                   phone=?,
+                                   address=?,
+                                   delivery_address=?,
+                                   product_label=?,
+                                   notes=?,
+                                   amount_spent=?,
+                                   do_number=?,
+                                   original_date=?
+                             WHERE customer_id=? AND deleted_at IS NULL
+                            """,
                             (
                                 new_name,
                                 new_phone,
                                 new_address,
+                                new_delivery_address,
                                 product_label,
+                                new_remarks,
+                                new_amount,
                                 new_do,
                                 purchase_str,
                                 cid,
