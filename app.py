@@ -5653,6 +5653,12 @@ def init_ui():
             padding: 0.85rem;
             border: 1px solid var(--ps-metric-border);
         }
+        [data-testid="stMetricValue"] {
+            color: var(--ps-text);
+        }
+        [data-testid="stMetricLabel"] {
+            color: var(--ps-muted);
+        }
         div[data-testid="stPopover"] > button {
             border: none !important;
             background: transparent !important;
@@ -7869,6 +7875,9 @@ def render_customer_quick_edit_section(
     show_filters: bool = True,
     show_id: bool = True,
     enable_pagination: bool = False,
+    limit_rows: Optional[int] = None,
+    show_do_code: bool = True,
+    show_duplicate: bool = True,
 ) -> pd.DataFrame:
     pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
@@ -7938,6 +7947,8 @@ def render_customer_quick_edit_section(
         offset = (page_number - 1) * page_size
         limit_clause = f"LIMIT {page_size} OFFSET {offset}"
         st.caption(f"Showing page {page_number} of {total_pages} ({total_count} customers).")
+    elif limit_rows:
+        limit_clause = f"LIMIT {int(limit_rows)}"
     df_raw = df_query(
         conn,
         f"""
@@ -8044,11 +8055,11 @@ def render_customer_quick_edit_section(
             "remarks",
             "purchase_date",
             "product_info",
-            "delivery_order_code",
-            "duplicate",
+            "delivery_order_code" if show_do_code else None,
+            "duplicate" if show_duplicate else None,
             "Action",
         ]
-        if col in editor_df.columns
+        if col and col in editor_df.columns
     ]
     editor_df = editor_df[column_order]
     doc_type_options = [
@@ -8068,11 +8079,12 @@ def render_customer_quick_edit_section(
         1.2,
         1.0,
         1.6,
-        1.0,
-        0.9,
-        1.4,
-        1.0,
     ]
+    if show_do_code:
+        base_widths.append(1.0)
+    if show_duplicate:
+        base_widths.append(0.9)
+    base_widths.extend([1.4, 1.0])
     widths = [0.5, *base_widths] if show_id else base_widths
     header_cols = st.columns(tuple(widths))
     header_idx = 0
@@ -8087,10 +8099,15 @@ def render_customer_quick_edit_section(
     header_cols[header_idx + 5].write("**Remarks**")
     header_cols[header_idx + 6].write("**Purchase date**")
     header_cols[header_idx + 7].write("**Product**")
-    header_cols[header_idx + 8].write("**DO code**")
-    header_cols[header_idx + 9].write("**Duplicate**")
-    header_cols[header_idx + 10].write("**Upload**")
-    header_cols[header_idx + 11].write("**Action**")
+    col_offset = 8
+    if show_do_code:
+        header_cols[header_idx + col_offset].write("**DO code**")
+        col_offset += 1
+    if show_duplicate:
+        header_cols[header_idx + col_offset].write("**Duplicate**")
+        col_offset += 1
+    header_cols[header_idx + col_offset].write("**Upload**")
+    header_cols[header_idx + col_offset + 1].write("**Action**")
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
@@ -8166,15 +8183,20 @@ def render_customer_quick_edit_section(
             key=product_key,
             label_visibility="collapsed",
         )
-        row_cols[row_idx + 8].text_input(
-            "DO code",
-            value=clean_text(row.get("delivery_order_code")) or "",
-            key=do_key,
-            label_visibility="collapsed",
-        )
-        row_cols[row_idx + 9].write(clean_text(row.get("duplicate")) or "")
+        col_offset = 8
+        if show_do_code:
+            row_cols[row_idx + col_offset].text_input(
+                "DO code",
+                value=clean_text(row.get("delivery_order_code")) or "",
+                key=do_key,
+                label_visibility="collapsed",
+            )
+            col_offset += 1
+        if show_duplicate:
+            row_cols[row_idx + col_offset].write(clean_text(row.get("duplicate")) or "")
+            col_offset += 1
         upload_container = getattr(st, "popover", None)
-        upload_target = row_cols[row_idx + 10]
+        upload_target = row_cols[row_idx + col_offset]
         if callable(upload_container):
             upload_panel = upload_target.popover("Upload", use_container_width=True)
         else:
@@ -8211,7 +8233,7 @@ def render_customer_quick_edit_section(
                     if saved:
                         st.success("Document uploaded.")
                         _safe_rerun()
-        row_cols[row_idx + 11].selectbox(
+        row_cols[row_idx + col_offset + 1].selectbox(
             "Action",
             options=["Keep", "Delete"],
             key=action_key,
@@ -8228,7 +8250,9 @@ def render_customer_quick_edit_section(
                 "remarks": st.session_state.get(remarks_key),
                 "purchase_date": st.session_state.get(purchase_key),
                 "product_info": st.session_state.get(product_key),
-                "delivery_order_code": st.session_state.get(do_key),
+                "delivery_order_code": st.session_state.get(do_key)
+                if show_do_code
+                else clean_text(row.get("delivery_order_code")),
                 "sales_person": row.get("sales_person"),
                 "Action": st.session_state.get(action_key),
             }
@@ -8832,7 +8856,6 @@ def render_customer_document_uploader(
         st.info("No customers available for document uploads yet.")
         return
 
-    doc_types = ["Delivery order", "Work done", "Quotation", "Service", "Maintenance"]
     upload_container = getattr(st, "popover", None)
     if callable(upload_container):
         container = upload_container("Upload documents", use_container_width=True)
@@ -8858,38 +8881,132 @@ def render_customer_document_uploader(
         customer_record = (
             customer_seed.iloc[0].to_dict() if not customer_seed.empty else {}
         )
-        doc_type = st.selectbox(
-            "Document type",
-            doc_types,
-            key=f"{key_prefix}_doc_type",
-        )
-        upload_file = st.file_uploader(
-            "Upload document",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_file",
-            help="Upload PDFs, images, or any other supporting documents.",
-        )
-        details = _render_doc_detail_inputs(
-            doc_type,
-            key_prefix=f"{key_prefix}_details",
-            defaults=customer_record,
-        )
-        if st.button("Save document", key=f"{key_prefix}_save"):
-            if upload_file is None:
-                st.error("Select a document to upload.")
-            else:
-                saved = _save_customer_document_upload(
-                    conn,
-                    customer_id=int(selected_customer),
-                    customer_record=customer_record,
-                    doc_type=doc_type,
-                    upload_file=upload_file,
-                    details=details,
-                )
-                if saved:
-                    st.success("Document uploaded.")
-                    _safe_rerun()
+        upload_cols = st.columns(2)
+        with upload_cols[0]:
+            st.markdown("**Quotation**")
+            quote_file = st.file_uploader(
+                "Quotation upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_quote_file",
+                help="Upload quotation PDFs or images.",
+            )
+            quote_details = _render_doc_detail_inputs(
+                "Quotation",
+                key_prefix=f"{key_prefix}_quote_details",
+                defaults=customer_record,
+            )
+            if st.button("Save quotation", key=f"{key_prefix}_quote_save"):
+                if quote_file is None:
+                    st.error("Select a quotation document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Quotation",
+                        upload_file=quote_file,
+                        details=quote_details,
+                    )
+                    if saved:
+                        st.success("Quotation uploaded.")
+                        _safe_rerun()
+
+        with upload_cols[1]:
+            st.markdown("**Work done**")
+            work_done_file = st.file_uploader(
+                "Work done upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_work_done_file",
+                help="Upload completed work slips or PDFs.",
+            )
+            work_done_details = _render_doc_detail_inputs(
+                "Work done",
+                key_prefix=f"{key_prefix}_work_done_details",
+                defaults=customer_record,
+            )
+            if st.button("Save work done", key=f"{key_prefix}_work_done_save"):
+                if work_done_file is None:
+                    st.error("Select a work done document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Work done",
+                        upload_file=work_done_file,
+                        details=work_done_details,
+                    )
+                    if saved:
+                        st.success("Work done uploaded.")
+                        _safe_rerun()
+
+        upload_cols = st.columns(2)
+        with upload_cols[0]:
+            st.markdown("**Delivery order (DO)**")
+            do_file = st.file_uploader(
+                "Delivery order upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_do_file",
+                help="Upload the delivery order PDF or image.",
+            )
+            do_details = _render_doc_detail_inputs(
+                "Delivery order",
+                key_prefix=f"{key_prefix}_do_details",
+                defaults=customer_record,
+            )
+            if st.button("Save delivery order", key=f"{key_prefix}_do_save"):
+                if do_file is None:
+                    st.error("Select a delivery order document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Delivery order",
+                        upload_file=do_file,
+                        details=do_details,
+                    )
+                    if saved:
+                        st.success("Delivery order uploaded.")
+                        _safe_rerun()
+
+        with upload_cols[1]:
+            st.markdown("**Service / Maintenance**")
+            service_choice = st.selectbox(
+                "Type",
+                ["Service", "Maintenance"],
+                key=f"{key_prefix}_service_choice",
+            )
+            service_file = st.file_uploader(
+                "Service/Maintenance upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_service_file",
+                help="Upload service or maintenance documents.",
+            )
+            service_details = _render_doc_detail_inputs(
+                service_choice,
+                key_prefix=f"{key_prefix}_service_details",
+                defaults=customer_record,
+            )
+            if st.button("Save service/maintenance", key=f"{key_prefix}_service_save"):
+                if service_file is None:
+                    st.error("Select a service/maintenance document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type=service_choice,
+                        upload_file=service_file,
+                        details=service_details,
+                    )
+                    if saved:
+                        st.success(f"{service_choice} uploaded.")
+                        _safe_rerun()
 
     docs_df = df_query(
         conn,
@@ -9097,34 +9214,27 @@ def customers_page(conn):
                     help="Upload the delivery order so it is linked to this record.",
                 )
                 st.markdown("---")
-                st.caption(
-                    "Create delivery, work done, service or maintenance entries alongside this customer."
+                create_cols = st.columns(4)
+                create_delivery_order = create_cols[0].checkbox(
+                    "Delivery order",
+                    value=bool(st.session_state.get("new_customer_create_delivery_order")) or bool(do_code),
+                    key="new_customer_create_delivery_order",
                 )
-
-                default_related: list[str] = []
-                if st.session_state.get("new_customer_create_delivery_order") or do_code:
-                    default_related.append("Delivery order")
-                if st.session_state.get("new_customer_create_work_done"):
-                    default_related.append("Work done")
-                if st.session_state.get("new_customer_create_service"):
-                    default_related.append("Service")
-                if st.session_state.get("new_customer_create_maintenance"):
-                    default_related.append("Maintenance")
-
-                selected_related = st.multiselect(
-                    "Related records to create",
-                    options=["Delivery order", "Work done", "Service", "Maintenance"],
-                    default=default_related,
-                    help=(
-                        "Select the record types you want to save with this customer. Only the "
-                        "relevant inputs will be shown so the section matches the dedicated pages."
-                    ),
+                create_work_done = create_cols[1].checkbox(
+                    "Work done",
+                    value=bool(st.session_state.get("new_customer_create_work_done")),
+                    key="new_customer_create_work_done",
                 )
-
-                create_delivery_order = "Delivery order" in selected_related
-                create_work_done = "Work done" in selected_related
-                create_service = "Service" in selected_related
-                create_maintenance = "Maintenance" in selected_related
+                create_service = create_cols[2].checkbox(
+                    "Service",
+                    value=bool(st.session_state.get("new_customer_create_service")),
+                    key="new_customer_create_service",
+                )
+                create_maintenance = create_cols[3].checkbox(
+                    "Maintenance",
+                    value=bool(st.session_state.get("new_customer_create_maintenance")),
+                    key="new_customer_create_maintenance",
+                )
                 st.session_state["new_customer_create_delivery_order"] = create_delivery_order
                 st.session_state["new_customer_create_work_done"] = create_work_done
                 st.session_state["new_customer_create_service"] = create_service
@@ -14644,7 +14754,10 @@ def operations_page(conn):
             key_prefix="operations_customers",
             include_leads=False,
             show_id=False,
-            enable_pagination=True,
+            enable_pagination=False,
+            limit_rows=50,
+            show_do_code=False,
+            show_duplicate=False,
         )
     st.markdown("---")
     record_options = {
@@ -17494,7 +17607,7 @@ def manage_import_history(conn):
     display_cols = [
         "import_id",
         "import_tag",
-        "imported_at",
+        "purchase_date",
         "customer_name",
         "phone",
         "delivery_address",
@@ -17503,13 +17616,17 @@ def manage_import_history(conn):
         "quantity",
         "amount_spent",
     ]
-    display = hist[display_cols].copy()
-    display = fmt_dates(display, ["imported_at"])
+    display = hist.copy()
+    display["purchase_date"] = display["live_purchase_date"].fillna(
+        display["original_date"]
+    )
+    display = display[display_cols]
+    display = fmt_dates(display, ["purchase_date"])
     display.rename(
         columns={
             "import_id": "ID",
             "import_tag": "Tag",
-            "imported_at": "Imported",
+            "purchase_date": "Purchase date",
             "customer_name": "Customer",
             "phone": "Phone",
             "delivery_address": "Delivery address",
