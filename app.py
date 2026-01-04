@@ -18493,30 +18493,6 @@ def main():
     if not st.session_state.get("user"):
         st.stop()
 
-    if "sidebar_visible" not in st.session_state:
-        st.session_state["sidebar_visible"] = True
-
-    sidebar_visible = st.session_state.get("sidebar_visible", True)
-    toggle_label = "Hide menu" if sidebar_visible else "Show menu"
-    if st.button(toggle_label, key="sidebar_toggle_button"):
-        st.session_state["sidebar_visible"] = not sidebar_visible
-        st.rerun()
-
-    if not st.session_state.get("sidebar_visible", True):
-        st.markdown(
-            """
-            <style>
-            [data-testid="stSidebar"] {
-                display: none !important;
-            }
-            [data-testid="stAppViewContainer"] {
-                margin-left: 0 !important;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
     if "page" not in st.session_state:
         st.session_state.page = "Dashboard"
 
