@@ -1003,12 +1003,14 @@ CREATE TABLE IF NOT EXISTS import_history (
     quantity INTEGER DEFAULT 1,
     imported_by INTEGER,
     deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL,
     FOREIGN KEY(product_id) REFERENCES products(product_id) ON DELETE SET NULL,
     FOREIGN KEY(order_id) REFERENCES orders(order_id) ON DELETE SET NULL,
     FOREIGN KEY(order_item_id) REFERENCES order_items(order_item_id) ON DELETE SET NULL,
     FOREIGN KEY(warranty_id) REFERENCES warranties(warranty_id) ON DELETE SET NULL,
-    FOREIGN KEY(imported_by) REFERENCES users(user_id) ON DELETE SET NULL
+    FOREIGN KEY(imported_by) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY(deleted_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS work_reports (
     report_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1207,6 +1209,7 @@ def ensure_schema_upgrades(conn):
     add_column("import_history", "imported_by", "INTEGER")
     add_column("import_history", "delivery_address", "TEXT")
     add_column("import_history", "quantity", "INTEGER DEFAULT 1")
+    add_column("import_history", "deleted_by", "INTEGER")
     add_column("work_reports", "grid_payload", "TEXT")
     add_column("work_reports", "attachment_path", "TEXT")
     add_column("work_reports", "import_file_path", "TEXT")
@@ -7207,10 +7210,20 @@ def dashboard(conn):
             deleted_df = df_query(
                 conn,
                 """
-                SELECT import_id, imported_at, customer_name, phone, product_label, original_date, do_number, deleted_at
-                FROM import_history
-                WHERE deleted_at IS NOT NULL
-                ORDER BY datetime(deleted_at) DESC
+                SELECT ih.import_id,
+                       ih.imported_at,
+                       ih.customer_name,
+                       ih.phone,
+                       ih.product_label,
+                       ih.original_date,
+                       ih.do_number,
+                       ih.deleted_at,
+                       ih.deleted_by,
+                       u.username AS deleted_by_name
+                FROM import_history ih
+                LEFT JOIN users u ON u.user_id = ih.deleted_by
+                WHERE ih.deleted_at IS NOT NULL
+                ORDER BY datetime(ih.deleted_at) DESC
                 """,
             )
 
@@ -7248,6 +7261,7 @@ def dashboard(conn):
                     "do_number",
                     "original_date",
                     "deleted_at",
+                    "deleted_by_name",
                 ]
                 st.dataframe(
                     formatted_deleted[preview_cols],
@@ -14267,7 +14281,10 @@ DELIVERY_STATUS_LABELS = {
 
 
 def normalize_delivery_status(value: Optional[str]) -> str:
-    normalized = clean_text(value).lower()
+    normalized_raw = clean_text(value)
+    if not normalized_raw:
+        return "due"
+    normalized = normalized_raw.lower()
     if normalized in DELIVERY_STATUS_OPTIONS:
         return normalized
     if normalized in {"pending", "rejected", "overdue"}:
@@ -17592,6 +17609,7 @@ def delete_import_entry(conn, record: dict) -> None:
     import_id = int_or_none(record.get("import_id"))
     if import_id is None:
         return
+    deleted_by = current_user_id()
 
     customer_id = int_or_none(record.get("customer_id"))
     product_id = int_or_none(record.get("product_id"))
@@ -17622,7 +17640,10 @@ def delete_import_entry(conn, record: dict) -> None:
     if customer_id is not None:
         cur.execute("DELETE FROM customers WHERE customer_id=?", (customer_id,))
 
-    cur.execute("UPDATE import_history SET deleted_at = datetime('now') WHERE import_id=?", (import_id,))
+    cur.execute(
+        "UPDATE import_history SET deleted_at = datetime('now'), deleted_by=? WHERE import_id=?",
+        (deleted_by, import_id),
+    )
     conn.commit()
 
     if attachment_path:
@@ -18026,7 +18047,7 @@ def manage_import_history(conn):
         SELECT ih.*, c.name AS live_customer_name, c.address AS live_address, c.phone AS live_phone,
                c.purchase_date AS live_purchase_date, c.product_info AS live_product_info,
                c.delivery_order_code AS live_do_code, c.delivery_address AS live_delivery_address,
-               c.attachment_path AS live_attachment_path
+               c.attachment_path AS live_attachment_path, c.created_by AS live_created_by
         FROM import_history ih
         LEFT JOIN customers c ON c.customer_id = ih.customer_id
         WHERE {where_clause}
@@ -18108,6 +18129,14 @@ def manage_import_history(conn):
 
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
+    viewer_id = current_user_id()
+    imported_by = int_or_none(selected.get("imported_by"))
+    created_by = int_or_none(selected.get("live_created_by"))
+    can_delete = bool(
+        is_admin
+        or (viewer_id is not None and imported_by is not None and viewer_id == imported_by)
+        or (viewer_id is not None and imported_by is None and created_by is not None and viewer_id == created_by)
+    )
 
     with st.form(f"manage_import_{selected_id}"):
         name_input = st.text_input("Customer name", value=current_name)
@@ -18138,7 +18167,7 @@ def manage_import_history(conn):
         )
         col1, col2 = st.columns(2)
         save_btn = col1.form_submit_button("Save changes", type="primary")
-        delete_btn = col2.form_submit_button("Delete import", disabled=not is_admin)
+        delete_btn = col2.form_submit_button("Delete import", disabled=not can_delete)
 
     if save_btn:
         update_import_entry(
@@ -18169,11 +18198,11 @@ def manage_import_history(conn):
         st.success("Import entry updated.")
         _safe_rerun()
 
-    if delete_btn and is_admin:
+    if delete_btn and can_delete:
         delete_import_entry(conn, selected)
         st.warning("Import entry deleted.")
         _safe_rerun()
-    elif delete_btn and not is_admin:
+    elif delete_btn and not can_delete:
         st.error("Only admins can delete import rows.")
 
 # ---------- Reports ----------
