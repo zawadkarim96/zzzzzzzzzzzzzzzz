@@ -2479,6 +2479,7 @@ def _theme_controls() -> None:
 def _navigation_pages(user: Dict) -> dict[str, str]:
     pages_common = {
         "Dashboard": "dashboard",
+        "Quotations": "quotations",
         "Work Orders": "work_orders",
         "Delivery Orders": "delivery_orders",
         "Notifications": "notifications",
@@ -2486,6 +2487,7 @@ def _navigation_pages(user: Dict) -> dict[str, str]:
     pages_admin = {
         "Companies": "companies",
         "Advanced Filters": "admin_filters",
+        "Settings": "settings",
         "Users": "users",
     }
     if user["role"] == "admin":
@@ -3379,27 +3381,25 @@ def render_dashboard(user: Dict) -> None:
         excel_data = export_state.get("excel_data")
         archive_data = export_state.get("archive_data")
         with export_cols[0]:
-            st.download_button(
-                "Download Excel summary",
-                data=excel_data,
-                file_name="ps_sales_summary.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                disabled=not excel_data,
-                help="Prepare exports to enable downloads."
-                if not excel_data
-                else None,
-            )
+            if excel_data:
+                st.download_button(
+                    "Download Excel summary",
+                    data=excel_data,
+                    file_name="ps_sales_summary.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.info("Prepare exports to enable downloads.")
         with export_cols[1]:
-            st.download_button(
-                "Download full archive (.rar)",
-                data=archive_data,
-                file_name="ps_sales_full_export.rar",
-                mime="application/octet-stream",
-                disabled=not archive_data,
-                help="Prepare exports to enable downloads."
-                if not archive_data
-                else None,
-            )
+            if archive_data:
+                st.download_button(
+                    "Download full archive (.zip)",
+                    data=archive_data,
+                    file_name="ps_sales_full_export.zip",
+                    mime="application/zip",
+                )
+            else:
+                st.info("Prepare exports to enable downloads.")
         backup_status = get_backup_status(BACKUP_DIR)
         if backup_status:
             backup_label = backup_status.get("last_backup_at") or "Unknown time"
@@ -5996,6 +5996,8 @@ def main() -> None:
             render_companies()
         elif page == "admin_filters":
             render_admin_filters()
+        elif page == "settings":
+            render_settings()
         elif page == "users":
             render_users()
         elif page == "notifications":
