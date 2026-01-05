@@ -1104,14 +1104,23 @@ END;
 
 # ---------- Helpers ----------
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA journal_mode = WAL;")
     return conn
 
 def init_schema(conn):
     ensure_upload_dirs()
     conn.executescript(SCHEMA_SQL)
-    ensure_schema_upgrades(conn)
+    for attempt in range(3):
+        try:
+            ensure_schema_upgrades(conn)
+            break
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
     conn.commit()
     # bootstrap admin if empty
     cur = conn.execute("SELECT COUNT(*) FROM users")
@@ -8389,10 +8398,11 @@ def render_customer_quick_edit_section(
         view_docs = docs_map.get(cid, [])
         view_target = row_cols[row_idx + col_offset]
         view_container = getattr(st, "popover", None)
+        view_label = "📎 View" if view_docs else "View"
         if callable(view_container):
-            view_panel = view_target.popover("View", use_container_width=True)
+            view_panel = view_target.popover(view_label, use_container_width=True)
         else:
-            view_panel = view_target.expander("View", expanded=False)
+            view_panel = view_target.expander(view_label, expanded=False)
         with view_panel:
             if not view_docs:
                 st.caption("No documents available.")
@@ -8770,7 +8780,7 @@ def _render_doc_detail_inputs(
         )
         st.markdown("**Quotation items**")
         edited_items = st.data_editor(
-            items_df[["description", "quantity", "rate", "total_price"]],
+            items_df[["description", "quantity", "rate"]],
             key=f"{items_key}_editor",
             num_rows="dynamic",
             hide_index=True,
@@ -8779,9 +8789,6 @@ def _render_doc_detail_inputs(
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
                 "rate": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
-                "total_price": st.column_config.NumberColumn(
-                    "Line total", format="%.2f", disabled=True
-                ),
             },
         )
         items_records = (
@@ -8837,7 +8844,7 @@ def _render_doc_detail_inputs(
         )
         st.markdown("**Products**")
         edited_items = st.data_editor(
-            items_df[["description", "quantity", "unit_price", "total"]],
+            items_df[["description", "quantity", "unit_price"]],
             key=f"{items_key}_editor",
             num_rows="dynamic",
             hide_index=True,
@@ -8846,7 +8853,6 @@ def _render_doc_detail_inputs(
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
                 "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
-                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
             },
         )
         items_records = (
@@ -8921,7 +8927,7 @@ def _render_doc_detail_inputs(
         )
         st.markdown("**Products**")
         edited_items = st.data_editor(
-            items_df[["description", "quantity", "unit_price", "total"]],
+            items_df[["description", "quantity", "unit_price"]],
             key=f"{items_key}_editor",
             num_rows="dynamic",
             hide_index=True,
@@ -8930,7 +8936,6 @@ def _render_doc_detail_inputs(
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
                 "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
-                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
             },
         )
         items_records = (
@@ -8988,7 +8993,7 @@ def _render_doc_detail_inputs(
         )
         st.markdown("**Products**")
         edited_items = st.data_editor(
-            items_df[["description", "quantity", "unit_price", "total"]],
+            items_df[["description", "quantity", "unit_price"]],
             key=f"{items_key}_editor",
             num_rows="dynamic",
             hide_index=True,
@@ -8997,7 +9002,6 @@ def _render_doc_detail_inputs(
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
                 "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
-                "total": st.column_config.NumberColumn("Line total", format="%.2f", disabled=True),
             },
         )
         items_records = (
@@ -9349,7 +9353,7 @@ def _save_customer_document_upload(
 
     if new_product_labels:
         existing_products = clean_text(customer_record.get("product_info"))
-        merged_products = existing_products
+        merged_products = existing_products or ""
         for label in new_product_labels:
             if label and label not in merged_products:
                 merged_products = dedupe_join([merged_products, label], " ; ")
@@ -9644,7 +9648,7 @@ def customers_page(conn):
                 axis=1,
             )
             edited_products = st.data_editor(
-                products_df,
+                products_df.drop(columns=["total"], errors="ignore"),
                 key="new_customer_products_table",
                 num_rows="dynamic",
                 hide_index=True,
@@ -9673,12 +9677,6 @@ def customers_page(conn):
                         min_value=0.0,
                         step=100.0,
                         format="%.2f",
-                    ),
-                    "total": st.column_config.NumberColumn(
-                        "Line total",
-                        format="%.2f",
-                        help="Quantity × unit price (read only)",
-                        disabled=True,
                     ),
                 },
             )
@@ -12843,7 +12841,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 items_df[column] = default_value
         items_df = items_df[["description", "quantity", "rate", "total_price"]]
         edited_df = st.data_editor(
-            items_df,
+            items_df.drop(columns=["total_price"], errors="ignore"),
             hide_index=True,
             num_rows="dynamic",
             use_container_width=True,
@@ -12857,13 +12855,6 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 ),
                 "rate": st.column_config.NumberColumn(
                     "Unit Price, Tk.", min_value=0.0, step=100.0, format="%.2f"
-                ),
-                "total_price": st.column_config.NumberColumn(
-                    "Total Price, Tk.",
-                    min_value=0.0,
-                    step=100.0,
-                    format="%.2f",
-                    help="Override the line total when it differs from quantity × unit price.",
                 ),
             },
         )
