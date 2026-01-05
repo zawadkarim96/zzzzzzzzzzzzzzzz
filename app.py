@@ -15356,7 +15356,6 @@ def customer_summary_page(conn):
     st.write("**Name:**", info.get("name") or blank_label)
     st.write("**Phone:**", info.get("phone"))
     st.write("**Address:**", info.get("address"))
-    st.write("**Purchase:**", info.get("purchase_dates"))
     st.write("**Product:**", info.get("products"))
     st.write("**Delivery order:**", info.get("do_codes"))
     if cnt > 1:
@@ -18243,8 +18242,6 @@ def manage_import_history(conn):
 
     display_cols = [
         "import_id",
-        "import_tag",
-        "purchase_date",
         "customer_name",
         "phone",
         "delivery_address",
@@ -18254,16 +18251,10 @@ def manage_import_history(conn):
         "amount_spent",
     ]
     display = hist.copy()
-    display["purchase_date"] = display["live_purchase_date"].fillna(
-        display["original_date"]
-    )
     display = display[display_cols]
-    display = fmt_dates(display, ["purchase_date"])
     display.rename(
         columns={
             "import_id": "ID",
-            "import_tag": "Tag",
-            "purchase_date": "Purchase date",
             "customer_name": "Customer",
             "phone": "Phone",
             "delivery_address": "Delivery address",
