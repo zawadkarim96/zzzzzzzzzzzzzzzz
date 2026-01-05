@@ -6195,6 +6195,7 @@ def dashboard(conn):
         render_notification_bell(conn)
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
+    current_actor_id = current_user_id()
     allowed_customers = accessible_customer_ids(conn)
     scope_clause, scope_params = customer_scope_filter("c")
 
@@ -8528,18 +8529,26 @@ def render_customer_quick_edit_section(
         action_value = st.session_state.get(action_key, "Keep")
         action_col = row_cols[row_idx + col_offset + 1]
         if action_icon_only:
-            if not is_admin:
+            row_created_by = int_or_none(original_map.get(cid, {}).get("created_by"))
+            can_delete_row = is_admin or (
+                current_actor_id is not None and row_created_by == current_actor_id
+            )
+            if not can_delete_row:
                 st.session_state[action_key] = "Keep"
                 action_value = "Keep"
                 action_col.button(
                     "🔒",
                     key=f"{action_key}_trash",
-                    help="Admin access required to delete",
+                    help="Only admins or record owners can delete",
                     disabled=True,
                     use_container_width=True,
                 )
             else:
-                delete_help = "Toggle delete selection (admin only)"
+                delete_help = (
+                    "Toggle delete selection"
+                    if is_admin
+                    else "Toggle delete selection (your own customers)"
+                )
                 if action_col.button(
                     "🗑️",
                     key=f"{action_key}_trash",
@@ -8580,7 +8589,7 @@ def render_customer_quick_edit_section(
         )
     if not is_admin:
         st.caption(
-            "Set Action to “Delete” requires admin access; non-admin changes will be ignored."
+            "Delete actions are limited to admins or the staff member who created the customer."
         )
     if is_admin and not editor_df.empty:
         delete_labels: dict[int, str] = {}
@@ -8646,11 +8655,17 @@ def render_customer_quick_edit_section(
                     continue
                 action = str(row.get("Action") or "Keep").strip().lower()
                 if action == "delete":
-                    if is_admin:
+                    row_created_by = int_or_none(original_map.get(cid, {}).get("created_by"))
+                    can_delete_row = is_admin or (
+                        current_actor_id is not None and row_created_by == current_actor_id
+                    )
+                    if can_delete_row:
                         delete_customer_record(conn, cid)
                         deletes += 1
                     else:
-                        errors.append(f"Only admins can delete customers (ID #{cid}).")
+                        errors.append(
+                            f"Only admins or record owners can delete customers (ID #{cid})."
+                        )
                     continue
                 new_name = clean_text(row.get("name"))
                 new_company = clean_text(row.get("company_name"))
@@ -15341,7 +15356,7 @@ def operations_page(conn):
             show_do_code=False,
             show_duplicate=False,
             action_icon_only=True,
-            use_popover=False,
+            use_popover=True,
         )
     st.markdown("---")
     record_options = {
