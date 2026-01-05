@@ -1003,12 +1003,14 @@ CREATE TABLE IF NOT EXISTS import_history (
     quantity INTEGER DEFAULT 1,
     imported_by INTEGER,
     deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL,
     FOREIGN KEY(product_id) REFERENCES products(product_id) ON DELETE SET NULL,
     FOREIGN KEY(order_id) REFERENCES orders(order_id) ON DELETE SET NULL,
     FOREIGN KEY(order_item_id) REFERENCES order_items(order_item_id) ON DELETE SET NULL,
     FOREIGN KEY(warranty_id) REFERENCES warranties(warranty_id) ON DELETE SET NULL,
-    FOREIGN KEY(imported_by) REFERENCES users(user_id) ON DELETE SET NULL
+    FOREIGN KEY(imported_by) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY(deleted_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS work_reports (
     report_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1207,6 +1209,7 @@ def ensure_schema_upgrades(conn):
     add_column("import_history", "imported_by", "INTEGER")
     add_column("import_history", "delivery_address", "TEXT")
     add_column("import_history", "quantity", "INTEGER DEFAULT 1")
+    add_column("import_history", "deleted_by", "INTEGER")
     add_column("work_reports", "grid_payload", "TEXT")
     add_column("work_reports", "attachment_path", "TEXT")
     add_column("work_reports", "import_file_path", "TEXT")
@@ -7207,10 +7210,20 @@ def dashboard(conn):
             deleted_df = df_query(
                 conn,
                 """
-                SELECT import_id, imported_at, customer_name, phone, product_label, original_date, do_number, deleted_at
-                FROM import_history
-                WHERE deleted_at IS NOT NULL
-                ORDER BY datetime(deleted_at) DESC
+                SELECT ih.import_id,
+                       ih.imported_at,
+                       ih.customer_name,
+                       ih.phone,
+                       ih.product_label,
+                       ih.original_date,
+                       ih.do_number,
+                       ih.deleted_at,
+                       ih.deleted_by,
+                       u.username AS deleted_by_name
+                FROM import_history ih
+                LEFT JOIN users u ON u.user_id = ih.deleted_by
+                WHERE ih.deleted_at IS NOT NULL
+                ORDER BY datetime(ih.deleted_at) DESC
                 """,
             )
 
@@ -7248,6 +7261,7 @@ def dashboard(conn):
                     "do_number",
                     "original_date",
                     "deleted_at",
+                    "deleted_by_name",
                 ]
                 st.dataframe(
                     formatted_deleted[preview_cols],
@@ -8089,6 +8103,154 @@ def render_customer_quick_edit_section(
         if col and col in editor_df.columns
     ]
     editor_df = editor_df[column_order]
+    customer_ids = [int(cid) for cid in editor_df.get("id", pd.Series(dtype=int)).tolist()]
+
+    def _build_quick_view_documents(customer_ids: list[int]) -> dict[int, list[dict[str, object]]]:
+        docs_map: dict[int, list[dict[str, object]]] = {cid: [] for cid in customer_ids}
+        if not customer_ids:
+            return docs_map
+        placeholders = ",".join(["?"] * len(customer_ids))
+
+        def _add_doc(cid: int, label: str, path: Optional[str], uploaded_at: Optional[object] = None) -> None:
+            if not path:
+                return
+            docs_map.setdefault(cid, []).append(
+                {"label": label, "path": path, "uploaded_at": uploaded_at}
+            )
+
+        customer_docs = df_query(
+            conn,
+            f"""
+            SELECT customer_id, doc_type, file_path, original_name, uploaded_at
+            FROM customer_documents
+            WHERE customer_id IN ({placeholders})
+            ORDER BY datetime(uploaded_at) DESC, document_id DESC
+            """,
+            tuple(customer_ids),
+        )
+        for _, row in customer_docs.iterrows():
+            cid = int_or_none(row.get("customer_id"))
+            if cid is None:
+                continue
+            doc_type = clean_text(row.get("doc_type")) or "Document"
+            original_name = clean_text(row.get("original_name")) or "(document)"
+            label = f"{doc_type}: {original_name}"
+            _add_doc(cid, label, clean_text(row.get("file_path")), row.get("uploaded_at"))
+
+        delivery_docs = df_query(
+            conn,
+            f"""
+            SELECT customer_id, do_number, record_type, file_path, payment_receipt_path, updated_at
+            FROM delivery_orders
+            WHERE customer_id IN ({placeholders}) AND deleted_at IS NULL
+            ORDER BY datetime(updated_at) DESC
+            """,
+            tuple(customer_ids),
+        )
+        for _, row in delivery_docs.iterrows():
+            cid = int_or_none(row.get("customer_id"))
+            if cid is None:
+                continue
+            do_number = clean_text(row.get("do_number")) or "-"
+            record_type = clean_text(row.get("record_type")) or "delivery_order"
+            label_base = "Work done" if record_type == "work_done" else "Delivery order"
+            _add_doc(
+                cid,
+                f"{label_base} {do_number} document",
+                clean_text(row.get("file_path")),
+                row.get("updated_at"),
+            )
+            _add_doc(
+                cid,
+                f"{label_base} {do_number} receipt",
+                clean_text(row.get("payment_receipt_path")),
+                row.get("updated_at"),
+            )
+
+        service_docs = df_query(
+            conn,
+            f"""
+            SELECT s.customer_id,
+                   s.service_id,
+                   s.do_number,
+                   s.bill_document_path,
+                   s.payment_receipt_path,
+                   s.updated_at,
+                   sd.file_path AS attachment_path,
+                   sd.original_name AS attachment_name,
+                   sd.uploaded_at AS attachment_uploaded_at
+            FROM services s
+            LEFT JOIN service_documents sd ON sd.service_id = s.service_id
+            WHERE s.customer_id IN ({placeholders})
+            ORDER BY datetime(s.updated_at) DESC
+            """,
+            tuple(customer_ids),
+        )
+        for _, row in service_docs.iterrows():
+            cid = int_or_none(row.get("customer_id"))
+            if cid is None:
+                continue
+            do_number = clean_text(row.get("do_number")) or "-"
+            _add_doc(
+                cid,
+                f"Service {do_number} bill",
+                clean_text(row.get("bill_document_path")),
+                row.get("updated_at"),
+            )
+            _add_doc(
+                cid,
+                f"Service {do_number} receipt",
+                clean_text(row.get("payment_receipt_path")),
+                row.get("updated_at"),
+            )
+            attachment_name = clean_text(row.get("attachment_name")) or "(attachment)"
+            _add_doc(
+                cid,
+                f"Service {do_number} attachment: {attachment_name}",
+                clean_text(row.get("attachment_path")),
+                row.get("attachment_uploaded_at"),
+            )
+
+        maintenance_docs = df_query(
+            conn,
+            f"""
+            SELECT m.customer_id,
+                   m.maintenance_id,
+                   m.do_number,
+                   m.payment_receipt_path,
+                   m.updated_at,
+                   md.file_path AS attachment_path,
+                   md.original_name AS attachment_name,
+                   md.uploaded_at AS attachment_uploaded_at
+            FROM maintenance_records m
+            LEFT JOIN maintenance_documents md ON md.maintenance_id = m.maintenance_id
+            WHERE m.customer_id IN ({placeholders})
+            ORDER BY datetime(m.updated_at) DESC
+            """,
+            tuple(customer_ids),
+        )
+        for _, row in maintenance_docs.iterrows():
+            cid = int_or_none(row.get("customer_id"))
+            if cid is None:
+                continue
+            do_number = clean_text(row.get("do_number")) or "-"
+            _add_doc(
+                cid,
+                f"Maintenance {do_number} receipt",
+                clean_text(row.get("payment_receipt_path")),
+                row.get("updated_at"),
+            )
+            attachment_name = clean_text(row.get("attachment_name")) or "(attachment)"
+            _add_doc(
+                cid,
+                f"Maintenance {do_number} attachment: {attachment_name}",
+                clean_text(row.get("attachment_path")),
+                row.get("attachment_uploaded_at"),
+            )
+
+        return docs_map
+
+    docs_map = _build_quick_view_documents(customer_ids)
     doc_type_options = [
         "Delivery order",
         "Work done",
@@ -8111,7 +8273,7 @@ def render_customer_quick_edit_section(
         base_widths.append(1.0)
     if show_duplicate:
         base_widths.append(0.9)
-    base_widths.extend([2.2, 1.0])
+    base_widths.extend([1.0, 2.2, 1.0])
     widths = [0.5, *base_widths] if show_id else base_widths
     header_cols = st.columns(tuple(widths))
     header_idx = 0
@@ -8133,9 +8295,10 @@ def render_customer_quick_edit_section(
     if show_duplicate:
         header_cols[header_idx + col_offset].write("**Duplicate**")
         col_offset += 1
-    header_cols[header_idx + col_offset].write("**Upload**")
+    header_cols[header_idx + col_offset].write("**View**")
+    header_cols[header_idx + col_offset + 1].write("**Upload**")
     action_label = "**Action**" if not action_icon_only else "**Delete**"
-    header_cols[header_idx + col_offset + 1].write(action_label)
+    header_cols[header_idx + col_offset + 2].write(action_label)
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
@@ -8223,6 +8386,38 @@ def render_customer_quick_edit_section(
         if show_duplicate:
             row_cols[row_idx + col_offset].write(clean_text(row.get("duplicate")) or "")
             col_offset += 1
+        view_docs = docs_map.get(cid, [])
+        view_target = row_cols[row_idx + col_offset]
+        view_container = getattr(st, "popover", None)
+        if callable(view_container):
+            view_panel = view_target.popover("View", use_container_width=True)
+        else:
+            view_panel = view_target.expander("View", expanded=False)
+        with view_panel:
+            if not view_docs:
+                st.caption("No documents available.")
+            else:
+                for idx, doc in enumerate(view_docs):
+                    label = clean_text(doc.get("label")) or "Document"
+                    uploaded_at = pd.to_datetime(
+                        doc.get("uploaded_at"), errors="coerce"
+                    )
+                    suffix = (
+                        f" ({uploaded_at.strftime('%d-%m-%Y')})"
+                        if pd.notna(uploaded_at)
+                        else ""
+                    )
+                    path = resolve_upload_path(doc.get("path"))
+                    if path and path.exists():
+                        st.download_button(
+                            f"{label}{suffix}",
+                            data=path.read_bytes(),
+                            file_name=path.name,
+                            key=f"{key_prefix}_quick_view_{cid}_{idx}",
+                        )
+                    else:
+                        st.caption(f"{label}{suffix} (file missing)")
+        col_offset += 1
         upload_container = getattr(st, "popover", None)
         upload_target = row_cols[row_idx + col_offset]
         if callable(upload_container):
@@ -14267,7 +14462,10 @@ DELIVERY_STATUS_LABELS = {
 
 
 def normalize_delivery_status(value: Optional[str]) -> str:
-    normalized = clean_text(value).lower()
+    normalized_raw = clean_text(value)
+    if not normalized_raw:
+        return "due"
+    normalized = normalized_raw.lower()
     if normalized in DELIVERY_STATUS_OPTIONS:
         return normalized
     if normalized in {"pending", "rejected", "overdue"}:
@@ -15031,7 +15229,7 @@ def operations_page(conn):
             include_leads=False,
             show_id=False,
             enable_pagination=False,
-            limit_rows=50,
+            limit_rows=20,
             show_do_code=False,
             show_duplicate=False,
             action_icon_only=True,
@@ -17592,6 +17790,7 @@ def delete_import_entry(conn, record: dict) -> None:
     import_id = int_or_none(record.get("import_id"))
     if import_id is None:
         return
+    deleted_by = current_user_id()
 
     customer_id = int_or_none(record.get("customer_id"))
     product_id = int_or_none(record.get("product_id"))
@@ -17622,7 +17821,10 @@ def delete_import_entry(conn, record: dict) -> None:
     if customer_id is not None:
         cur.execute("DELETE FROM customers WHERE customer_id=?", (customer_id,))
 
-    cur.execute("UPDATE import_history SET deleted_at = datetime('now') WHERE import_id=?", (import_id,))
+    cur.execute(
+        "UPDATE import_history SET deleted_at = datetime('now'), deleted_by=? WHERE import_id=?",
+        (deleted_by, import_id),
+    )
     conn.commit()
 
     if attachment_path:
@@ -18026,7 +18228,7 @@ def manage_import_history(conn):
         SELECT ih.*, c.name AS live_customer_name, c.address AS live_address, c.phone AS live_phone,
                c.purchase_date AS live_purchase_date, c.product_info AS live_product_info,
                c.delivery_order_code AS live_do_code, c.delivery_address AS live_delivery_address,
-               c.attachment_path AS live_attachment_path
+               c.attachment_path AS live_attachment_path, c.created_by AS live_created_by
         FROM import_history ih
         LEFT JOIN customers c ON c.customer_id = ih.customer_id
         WHERE {where_clause}
@@ -18108,6 +18310,14 @@ def manage_import_history(conn):
 
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
+    viewer_id = current_user_id()
+    imported_by = int_or_none(selected.get("imported_by"))
+    created_by = int_or_none(selected.get("live_created_by"))
+    can_delete = bool(
+        is_admin
+        or (viewer_id is not None and imported_by is not None and viewer_id == imported_by)
+        or (viewer_id is not None and imported_by is None and created_by is not None and viewer_id == created_by)
+    )
 
     with st.form(f"manage_import_{selected_id}"):
         name_input = st.text_input("Customer name", value=current_name)
@@ -18138,7 +18348,7 @@ def manage_import_history(conn):
         )
         col1, col2 = st.columns(2)
         save_btn = col1.form_submit_button("Save changes", type="primary")
-        delete_btn = col2.form_submit_button("Delete import", disabled=not is_admin)
+        delete_btn = col2.form_submit_button("Delete import", disabled=not can_delete)
 
     if save_btn:
         update_import_entry(
@@ -18169,11 +18379,11 @@ def manage_import_history(conn):
         st.success("Import entry updated.")
         _safe_rerun()
 
-    if delete_btn and is_admin:
+    if delete_btn and can_delete:
         delete_import_entry(conn, selected)
         st.warning("Import entry deleted.")
         _safe_rerun()
-    elif delete_btn and not is_admin:
+    elif delete_btn and not can_delete:
         st.error("Only admins can delete import rows.")
 
 # ---------- Reports ----------
