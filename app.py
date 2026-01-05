@@ -4556,6 +4556,14 @@ def apply_theme_css() -> None:
         [data-testid="stSidebar"] {{
             background-color: var(--ps-sidebar-bg);
         }}
+        div[data-testid="stMarkdownContainer"] p,
+        div[data-testid="stMarkdownContainer"] li,
+        div[data-testid="stMarkdownContainer"] span,
+        div[data-testid="stText"] {{
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            white-space: pre-wrap;
+        }}
         .ps-ribbon-nav {{
             position: sticky;
             top: 1rem;
@@ -4984,6 +4992,17 @@ def apply_theme_css() -> None:
             color: var(--ps-text) !important;
             fill: var(--ps-text) !important;
         }}
+        [data-testid="stFileUploader"] ul,
+        [data-testid="stFileUploader"] li,
+        [data-testid="stFileUploader"] li span,
+        [data-testid="stFileUploader"] li small,
+        [data-testid="stFileUploader"] [data-testid="stFileUploaderFileName"] {{
+            color: var(--ps-text) !important;
+        }}
+        [data-testid="stFileUploader"] li {{
+            background-color: var(--ps-panel-bg) !important;
+            border-color: var(--ps-panel-border) !important;
+        }}
         [data-testid="stFileUploader"] button {{
             background-color: var(--ps-button-bg) !important;
             border-color: var(--ps-button-border) !important;
@@ -4998,6 +5017,24 @@ def apply_theme_css() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _guard_double_submit(
+    action_key: str,
+    submitted: bool,
+    *,
+    cooldown_seconds: float = 3.0,
+) -> bool:
+    if not submitted:
+        return False
+    state_key = f"submit_guard_{action_key}"
+    last_submit = st.session_state.get(state_key)
+    now = time.time()
+    if isinstance(last_submit, (int, float)) and now - last_submit < cooldown_seconds:
+        st.warning("That was just submitted. Please wait a moment before trying again.")
+        return False
+    st.session_state[state_key] = now
+    return True
 
 
 def _find_login_cover_image() -> Optional[Path]:
@@ -7925,6 +7962,7 @@ def render_customer_quick_edit_section(
     show_do_code: bool = True,
     show_duplicate: bool = True,
     action_icon_only: bool = False,
+    use_popover: bool = True,
 ) -> pd.DataFrame:
     pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
@@ -8116,6 +8154,7 @@ def render_customer_quick_edit_section(
 
     def _build_quick_view_documents(customer_ids: list[int]) -> dict[int, list[dict[str, object]]]:
         docs_map: dict[int, list[dict[str, object]]] = {cid: [] for cid in customer_ids}
+        seen: dict[int, set[tuple[str, str]]] = {cid: set() for cid in customer_ids}
         if not customer_ids:
             return docs_map
         placeholders = ",".join(["?"] * len(customer_ids))
@@ -8123,8 +8162,17 @@ def render_customer_quick_edit_section(
         def _add_doc(cid: int, label: str, path: Optional[str], uploaded_at: Optional[object] = None) -> None:
             if not path:
                 return
+            label_clean = clean_text(label) or "Document"
+            path_clean = clean_text(path) or ""
+            if not path_clean:
+                return
+            doc_key = (label_clean, path_clean)
+            seen.setdefault(cid, set())
+            if doc_key in seen[cid]:
+                return
+            seen[cid].add(doc_key)
             docs_map.setdefault(cid, []).append(
-                {"label": label, "path": path, "uploaded_at": uploaded_at}
+                {"label": label_clean, "path": path_clean, "uploaded_at": uploaded_at}
             )
 
         customer_docs = df_query(
@@ -8399,7 +8447,7 @@ def render_customer_quick_edit_section(
         view_target = row_cols[row_idx + col_offset]
         view_container = getattr(st, "popover", None)
         view_label = "📎 View" if view_docs else "View"
-        if callable(view_container):
+        if use_popover and callable(view_container):
             view_panel = view_target.popover(view_label, use_container_width=True)
         else:
             view_panel = view_target.expander(view_label, expanded=False)
@@ -8430,7 +8478,7 @@ def render_customer_quick_edit_section(
         col_offset += 1
         upload_container = getattr(st, "popover", None)
         upload_target = row_cols[row_idx + col_offset]
-        if callable(upload_container):
+        if use_popover and callable(upload_container):
             upload_panel = upload_target.popover("Upload", use_container_width=True)
         else:
             upload_panel = upload_target.expander("Upload", expanded=False)
@@ -8460,7 +8508,8 @@ def render_customer_quick_edit_section(
                 "Other": "📎",
             }
             upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
-            if st.button(upload_label, key=upload_btn_key):
+            upload_clicked = st.button(upload_label, key=upload_btn_key)
+            if _guard_double_submit(upload_btn_key, upload_clicked):
                 if upload_file is None:
                     st.warning("Select a file to upload.")
                 else:
@@ -8479,24 +8528,30 @@ def render_customer_quick_edit_section(
         action_value = st.session_state.get(action_key, "Keep")
         action_col = row_cols[row_idx + col_offset + 1]
         if action_icon_only:
-            delete_help = (
-                "Toggle delete selection (admin only)"
-                if is_admin
-                else "Admin access required to delete"
-            )
-            if action_col.button(
-                "🗑️",
-                key=f"{action_key}_trash",
-                help=delete_help,
-                disabled=not is_admin,
-                use_container_width=True,
-            ):
-                st.session_state[action_key] = (
-                    "Keep" if action_value == "Delete" else "Delete"
+            if not is_admin:
+                st.session_state[action_key] = "Keep"
+                action_value = "Keep"
+                action_col.button(
+                    "🔒",
+                    key=f"{action_key}_trash",
+                    help="Admin access required to delete",
+                    disabled=True,
+                    use_container_width=True,
                 )
-                action_value = st.session_state[action_key]
-            if action_value == "Delete":
-                action_col.caption("Marked")
+            else:
+                delete_help = "Toggle delete selection (admin only)"
+                if action_col.button(
+                    "🗑️",
+                    key=f"{action_key}_trash",
+                    help=delete_help,
+                    use_container_width=True,
+                ):
+                    st.session_state[action_key] = (
+                        "Keep" if action_value == "Delete" else "Delete"
+                    )
+                    action_value = st.session_state[action_key]
+                if action_value == "Delete":
+                    action_col.caption("Marked")
         else:
             action_col.selectbox(
                 "Action",
@@ -9419,7 +9474,11 @@ def render_customer_document_uploader(
                 key_prefix=f"{key_prefix}_quote_details",
                 defaults=customer_record,
             )
-            if st.button("Save quotation", key=f"{key_prefix}_quote_save"):
+            submit_quote = st.button(
+                "Save quotation",
+                key=f"{key_prefix}_quote_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_quote_save", submit_quote):
                 if quote_file is None:
                     st.error("Select a quotation document to upload.")
                 else:
@@ -9449,7 +9508,11 @@ def render_customer_document_uploader(
                 key_prefix=f"{key_prefix}_work_done_details",
                 defaults=customer_record,
             )
-            if st.button("Save work done", key=f"{key_prefix}_work_done_save"):
+            submit_work_done = st.button(
+                "Save work done",
+                key=f"{key_prefix}_work_done_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_work_done_save", submit_work_done):
                 if work_done_file is None:
                     st.error("Select a work done document to upload.")
                 else:
@@ -9480,7 +9543,11 @@ def render_customer_document_uploader(
                 key_prefix=f"{key_prefix}_do_details",
                 defaults=customer_record,
             )
-            if st.button("Save delivery order", key=f"{key_prefix}_do_save"):
+            submit_do = st.button(
+                "Save delivery order",
+                key=f"{key_prefix}_do_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
                 if do_file is None:
                     st.error("Select a delivery order document to upload.")
                 else:
@@ -9515,7 +9582,11 @@ def render_customer_document_uploader(
                 key_prefix=f"{key_prefix}_service_details",
                 defaults=customer_record,
             )
-            if st.button("Save service/maintenance", key=f"{key_prefix}_service_save"):
+            submit_service = st.button(
+                "Save service/maintenance",
+                key=f"{key_prefix}_service_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_service_save", submit_service):
                 if service_file is None:
                     st.error("Select a service/maintenance document to upload.")
                 else:
@@ -9892,7 +9963,7 @@ def customers_page(conn):
                 )
                 _safe_rerun()
                 return
-            if submitted:
+            if _guard_double_submit("new_customer_save", submitted):
                 errors: list[str] = []
                 if not name.strip():
                     errors.append("Customer name is required before saving.")
@@ -11460,7 +11531,8 @@ def _render_service_section(conn, *, show_heading: bool = True):
             )
         elif existing_receipt_path:
             st.caption("Receipt file not found. Upload a new copy to replace it.")
-        if st.button("Save updates", key="save_service_updates"):
+        save_updates = st.button("Save updates", key="save_service_updates")
+        if _guard_double_submit("save_service_updates", save_updates):
             (
                 service_date_str,
                 service_start_str,
@@ -12954,7 +13026,7 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
         )
         _safe_rerun()
 
-    if submit:
+    if _guard_double_submit("quotation_form_save", submit):
         prepared_items = [dict(item) for item in st.session_state.get("quotation_item_rows", [])]
         for item in prepared_items:
             if item.get("discount") in (None, ""):
@@ -13156,7 +13228,7 @@ def _render_quotation_management(conn):
             f"""
             SELECT q.quotation_id, q.reference, q.quote_date, q.customer_company, q.customer_name, q.customer_contact,
                    q.total_amount, q.status, q.follow_up_status, q.follow_up_notes, q.follow_up_date,
-                   q.reminder_label, q.payment_receipt_path, q.items_payload,
+                   q.reminder_label, q.payment_receipt_path, q.items_payload, q.document_path,
                    q.created_by, COALESCE(u.username, '(user)') AS created_by_name
             FROM quotations q
             LEFT JOIN users u ON u.user_id = q.created_by
@@ -13171,6 +13243,46 @@ def _render_quotation_management(conn):
     if quotes_df.empty:
         st.info("No quotations recorded yet. Create a quotation above to start tracking.")
         return
+
+    upload_records = []
+    for _, row in quotes_df.iterrows():
+        document_path = clean_text(row.get("document_path"))
+        if not document_path:
+            continue
+        upload_records.append(
+            {
+                "quotation_id": row.get("quotation_id"),
+                "reference": clean_text(row.get("reference")) or "Quotation",
+                "customer": clean_text(row.get("customer_company"))
+                or clean_text(row.get("customer_name"))
+                or clean_text(row.get("customer_contact")),
+                "document_path": document_path,
+                "quote_date": row.get("quote_date"),
+                "created_by_name": clean_text(row.get("created_by_name")) or "(user)",
+            }
+        )
+    if upload_records:
+        st.markdown("#### Uploaded quotation files")
+        for record in upload_records:
+            path = resolve_upload_path(record.get("document_path"))
+            label_parts = [
+                record.get("reference"),
+                record.get("customer"),
+            ]
+            created_by_label = record.get("created_by_name")
+            if created_by_label:
+                label_parts.append(created_by_label)
+            label = " • ".join(part for part in label_parts if part)
+            if path and path.exists():
+                st.download_button(
+                    label,
+                    data=path.read_bytes(),
+                    file_name=path.name,
+                    key=f"quotation_upload_{record.get('quotation_id')}",
+                )
+            else:
+                st.caption(f"{label} (file missing)")
+        st.markdown("---")
 
     def _extract_product_summary(items_payload: object) -> str:
         if items_payload in (None, "", "nan", "NaT"):
@@ -13323,11 +13435,12 @@ def _render_quotation_management(conn):
         st.info("No pending quotations to update.")
 
     save_disabled = editable_df.empty or not edited_records
-    if st.button(
+    save_tracker = st.button(
         "Save quotation updates",
         key="quotation_tracker_save",
         disabled=save_disabled,
-    ) and edited_records:
+    )
+    if _guard_double_submit("quotation_tracker_save", save_tracker) and edited_records:
         sanitized_records: list[dict[str, object]] = []
         for record in edited_records:
             sanitized_records.append(dict(record))
@@ -14291,7 +14404,11 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             )
         elif existing_receipt_path:
             st.caption("Receipt file not found. Upload a new copy to replace it.")
-        if st.button("Save maintenance updates", key="save_maintenance_updates"):
+        save_maintenance = st.button(
+            "Save maintenance updates",
+            key="save_maintenance_updates",
+        )
+        if _guard_double_submit("save_maintenance_updates", save_maintenance):
             (
                 maintenance_date_str,
                 maintenance_start_str,
@@ -14699,7 +14816,7 @@ def delivery_orders_page(
         )
         submit = st.form_submit_button(f"Save {record_label_lower}", type="primary")
 
-    if submit:
+    if _guard_double_submit(f"{record_type_key}_save_form", submit):
         sales_person = clean_text(get_current_user().get("username"))
         cleaned_number = clean_text(do_number)
         if not cleaned_number:
@@ -15041,7 +15158,7 @@ def delivery_orders_page(
             save_doc = row_cols[7].button(
                 save_label, type="secondary", key=f"do_row_save_{row_key}"
             )
-            if save_doc:
+            if _guard_double_submit(f"do_row_save_{row_key}", save_doc):
                 if upload_doc is None and upload_receipt is None:
                     st.warning("Select a document or receipt to upload.")
                 else:
@@ -15224,6 +15341,7 @@ def operations_page(conn):
             show_do_code=False,
             show_duplicate=False,
             action_icon_only=True,
+            use_popover=False,
         )
     st.markdown("---")
     record_options = {
