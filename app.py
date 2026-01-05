@@ -8277,7 +8277,16 @@ def render_customer_quick_edit_section(
                 key_prefix=f"{upload_key}_details",
                 defaults=row,
             )
-            if st.button("Save upload", key=upload_btn_key):
+            doc_type_emoji = {
+                "Delivery order": "🚚",
+                "Work done": "✅",
+                "Quotation": "🧾",
+                "Service": "🛠️",
+                "Maintenance": "🧰",
+                "Other": "📎",
+            }
+            upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
+            if st.button(upload_label, key=upload_btn_key):
                 if upload_file is None:
                     st.warning("Select a file to upload.")
                 else:
@@ -8385,6 +8394,7 @@ def render_customer_quick_edit_section(
                 except Exception as err:
                     st.error(f"Unable to delete customer #{cid}: {err}")
             if deleted_count:
+                st.session_state[delete_state_key] = []
                 st.warning(f"Deleted {deleted_count} customer(s).")
                 _safe_rerun()
     if st.button(
@@ -14863,6 +14873,7 @@ def delivery_orders_page(
             )
 
             st.success(f"{record_label} {cleaned_number} saved successfully.")
+            _safe_rerun()
 
     number_label = f"{record_label} number"
     st.markdown(f"### {record_label} search")
@@ -14961,7 +14972,7 @@ def delivery_orders_page(
 
             do_df["total_amount"] = do_df["total_amount"].apply(_format_total_value)
         st.markdown(f"#### {record_label} records")
-        header_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.5))
+        header_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2, 1.2))
         header_cols[0].write(f"**{number_label}**")
         header_cols[1].write("**Customer**")
         header_cols[2].write("**Description**")
@@ -14970,6 +14981,7 @@ def delivery_orders_page(
         header_cols[5].write("**Attachment**")
         header_cols[6].write("**Receipt**")
         header_cols[7].write("**Upload doc**")
+        header_cols[8].write("**Upload receipt**")
 
         for _, row in do_df.iterrows():
             do_number = clean_text(row.get("do_number"))
@@ -14977,53 +14989,94 @@ def delivery_orders_page(
                 continue
             row_key = f"{record_type_key}_{do_number}"
             with st.form(f"do_upload_row_{row_key}"):
-                row_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.5))
+                row_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2, 1.2))
                 row_cols[0].write(do_number)
                 row_cols[1].write(clean_text(row.get("customer")) or "(unknown)")
                 row_cols[2].write(clean_text(row.get("description")) or "")
                 row_cols[3].write(clean_text(row.get("total_amount")) or "")
                 row_cols[4].write(clean_text(row.get("status")) or "")
                 row_cols[5].write(clean_text(row.get("Document")) or "")
-                row_cols[6].write(clean_text(row.get("Receipt")) or "")
+                receipt_value = clean_text(row.get("payment_receipt_path"))
+                receipt_file = resolve_upload_path(receipt_value) if receipt_value else None
+                if receipt_file and receipt_file.exists():
+                    row_cols[6].download_button(
+                        "View",
+                        data=receipt_file.read_bytes(),
+                        file_name=receipt_file.name,
+                        key=f"do_receipt_view_{row_key}",
+                    )
+                else:
+                    row_cols[6].write(clean_text(row.get("Receipt")) or "")
                 upload_doc = row_cols[7].file_uploader(
                     "Upload document",
                     type=["pdf"],
                     label_visibility="collapsed",
                     key=f"do_row_doc_upload_{row_key}",
                 )
-                save_doc = row_cols[7].form_submit_button("Save", type="secondary")
+                upload_receipt = row_cols[8].file_uploader(
+                    "Upload receipt",
+                    type=["pdf", "png", "jpg", "jpeg", "webp"],
+                    label_visibility="collapsed",
+                    key=f"do_row_receipt_upload_{row_key}",
+                )
+                save_label = f"💾 Save {record_label}"
+                save_doc = row_cols[7].form_submit_button(save_label, type="secondary")
                 if save_doc:
-                    if upload_doc is None:
-                        st.warning("Select a PDF to upload.")
+                    if upload_doc is None and upload_receipt is None:
+                        st.warning("Select a document or receipt to upload.")
                     else:
-                        stored_path = store_uploaded_pdf(
-                            upload_doc,
-                            DELIVERY_ORDER_DIR,
-                            filename=(
-                                f"{record_type_key}_{_sanitize_path_component(do_number)}.pdf"
-                            ),
-                        )
-                        conn.execute(
-                            """
-                            UPDATE delivery_orders
-                               SET file_path=?,
-                                   updated_at=datetime('now')
-                             WHERE do_number=?
-                               AND COALESCE(record_type, 'delivery_order') = ?
-                               AND deleted_at IS NULL
-                            """,
-                            (stored_path, do_number, record_type_key),
-                        )
-                        conn.commit()
-                        log_activity(
-                            conn,
-                            event_type=f"{record_type_key}_document_uploaded",
-                            description=f"{record_label} {do_number} document uploaded",
-                            entity_type=record_type_key,
-                            entity_id=None,
-                        )
-                        st.success("Document uploaded.")
-                        _safe_rerun()
+                        updates = {}
+                        if upload_doc is not None:
+                            stored_path = store_uploaded_pdf(
+                                upload_doc,
+                                DELIVERY_ORDER_DIR,
+                                filename=(
+                                    f"{record_type_key}_{_sanitize_path_component(do_number)}.pdf"
+                                ),
+                            )
+                            updates["file_path"] = stored_path
+                        if upload_receipt is not None:
+                            receipt_identifier = _sanitize_path_component(do_number) or "do_receipt"
+                            receipt_path = store_payment_receipt(
+                                upload_receipt,
+                                identifier=f"{receipt_identifier}_receipt",
+                                target_dir=DELIVERY_RECEIPT_DIR,
+                            )
+                            updates["payment_receipt_path"] = receipt_path
+                        if updates:
+                            set_clause = ", ".join(f"{col}=?" for col in updates)
+                            params = list(updates.values())
+                            params.extend([do_number, record_type_key])
+                            conn.execute(
+                                f"""
+                                UPDATE delivery_orders
+                                   SET {set_clause},
+                                       updated_at=datetime('now')
+                                 WHERE do_number=?
+                                   AND COALESCE(record_type, 'delivery_order') = ?
+                                   AND deleted_at IS NULL
+                                """,
+                                tuple(params),
+                            )
+                            conn.commit()
+                            if "file_path" in updates:
+                                log_activity(
+                                    conn,
+                                    event_type=f"{record_type_key}_document_uploaded",
+                                    description=f"{record_label} {do_number} document uploaded",
+                                    entity_type=record_type_key,
+                                    entity_id=None,
+                                )
+                            if "payment_receipt_path" in updates:
+                                log_activity(
+                                    conn,
+                                    event_type=f"{record_type_key}_receipt_uploaded",
+                                    description=f"{record_label} {do_number} receipt uploaded",
+                                    entity_type=record_type_key,
+                                    entity_id=None,
+                                )
+                            st.success("Upload saved.")
+                            _safe_rerun()
 
     downloads = {}
     if not do_df.empty:
