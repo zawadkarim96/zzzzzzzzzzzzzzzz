@@ -8068,6 +8068,7 @@ def render_customer_quick_edit_section(
     df_raw = df_raw[~lead_mask].copy()
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
+    current_actor_id = current_user_id()
     if include_leads and not lead_df.empty:
         st.markdown("### Leads (Chasing)")
         lead_view = lead_df.copy()
