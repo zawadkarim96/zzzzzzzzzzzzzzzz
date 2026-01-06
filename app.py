@@ -151,6 +151,16 @@ SERVICE_REPORT_FIELDS = OrderedDict(
             },
         ),
         (
+            "amount_spent",
+            {
+                "label": "Amount spent",
+                "type": "number",
+                "format": "%.2f",
+                "step": 100.0,
+                "help": "Amount spent or billed for this work.",
+            },
+        ),
+        (
             "quotation_tk",
             {
                 "label": "Quotation Tk",
@@ -1699,12 +1709,18 @@ def _extract_text_from_quotation_upload(upload) -> tuple[str, list[str]]:
     file_bytes = upload.getvalue()
 
     def _ocr_image(image: Image.Image) -> str:
+        global _OCR_ENGINE_AVAILABLE
+        if _OCR_ENGINE_AVAILABLE is False:
+            return ""
         try:
             import pytesseract
+            _OCR_ENGINE_AVAILABLE = True
         except Exception:  # pragma: no cover - optional dependency
-            warnings.append(
-                "Install pytesseract and Tesseract OCR to read text from images."
-            )
+            if _OCR_ENGINE_AVAILABLE is None:
+                warnings.append(
+                    "Install pytesseract and Tesseract OCR to read text from images."
+                )
+            _OCR_ENGINE_AVAILABLE = False
             return ""
 
         try:
@@ -1791,21 +1807,19 @@ OCR_UPLOAD_SUFFIXES = {
 }
 
 
+_OCR_ENGINE_AVAILABLE: Optional[bool] = None
+
+
 def _ocr_uploads_enabled() -> bool:
     return bool(st.session_state.get("ocr_uploads_enabled", True))
 
 
-def _render_upload_ocr_preview(
-    upload,
-    *,
-    key_prefix: str,
-    label: str = "Auto-detected text (OCR)",
-) -> None:
+def _run_upload_ocr(upload, *, key_prefix: str) -> tuple[str, list[str]]:
     if upload is None or not _ocr_uploads_enabled():
-        return
+        return "", []
     suffix = Path(upload.name).suffix.lower() if getattr(upload, "name", None) else ""
     if suffix not in OCR_UPLOAD_SUFFIXES:
-        return
+        return "", []
     token = f"{getattr(upload, 'name', '')}:{getattr(upload, 'size', '')}"
     token_key = f"{key_prefix}_ocr_token"
     text_key = f"{key_prefix}_ocr_text"
@@ -1817,8 +1831,32 @@ def _render_upload_ocr_preview(
         st.session_state[warnings_key] = warnings
     text_content = clean_text(st.session_state.get(text_key)) or ""
     warnings = st.session_state.get(warnings_key, [])
+    return text_content, warnings
+
+
+def _show_ocr_warnings_once(warnings: list[str]) -> None:
+    for warning in warnings:
+        warning_key = f"ocr_warning_seen_{hash(warning)}"
+        if st.session_state.get(warning_key):
+            continue
+        st.session_state[warning_key] = True
+        st.caption(f"OCR notice: {warning}")
+
+
+def _render_upload_ocr_preview(
+    upload,
+    *,
+    key_prefix: str,
+    label: str = "Auto-detected text (OCR)",
+    show_preview: bool = False,
+) -> tuple[str, list[str]]:
+    text_content, warnings = _run_upload_ocr(upload, key_prefix=key_prefix)
+    if warnings:
+        _show_ocr_warnings_once(warnings)
+    if not show_preview:
+        return text_content, warnings
     if not text_content and not warnings:
-        return
+        return text_content, warnings
     with st.expander(label):
         if warnings:
             for warning in warnings:
@@ -1830,6 +1868,117 @@ def _render_upload_ocr_preview(
                 height=200,
                 key=f"{key_prefix}_ocr_text_area",
             )
+    return text_content, warnings
+
+
+def _items_blank(items: list[dict[str, object]], *, fields: tuple[str, ...]) -> bool:
+    if not items:
+        return True
+    for item in items:
+        for field in fields:
+            value = item.get(field)
+            if value not in (None, "", 0, 0.0):
+                return False
+    return True
+
+
+def _apply_ocr_autofill(
+    *,
+    upload,
+    ocr_key_prefix: str,
+    doc_type: str,
+    details_key_prefix: str,
+) -> None:
+    text_content, warnings = _run_upload_ocr(upload, key_prefix=ocr_key_prefix)
+    if warnings:
+        _show_ocr_warnings_once(warnings)
+    if not text_content:
+        return
+    if doc_type == "Quotation":
+        metadata = _extract_quotation_metadata(text_content)
+        ref_key = f"{details_key_prefix}_quotation_reference"
+        if clean_text(metadata.get("quotation_reference")) and not clean_text(
+            st.session_state.get(ref_key)
+        ):
+            st.session_state[ref_key] = metadata.get("quotation_reference")
+        date_key = f"{details_key_prefix}_quotation_date"
+        parsed_date = metadata.get("quotation_date")
+        if parsed_date and not st.session_state.get(date_key):
+            st.session_state[date_key] = parsed_date
+        items_key = f"{details_key_prefix}_quotation_items"
+        detected_items = metadata.get("_detected_items") or []
+        if detected_items:
+            existing_items = st.session_state.get(items_key, [])
+            if _items_blank(existing_items, fields=("description", "quantity", "rate")):
+                mapped_items = []
+                for item in detected_items:
+                    mapped_items.append(
+                        {
+                            "description": item.get("description") or "",
+                            "quantity": _coerce_float(item.get("quantity"), 1.0),
+                            "rate": _coerce_float(item.get("rate"), 0.0),
+                        }
+                    )
+                st.session_state[items_key] = mapped_items
+    elif doc_type in ("Delivery order", "Work done", "Service", "Maintenance"):
+        lines = [line.strip() for line in text_content.splitlines() if line.strip()]
+        detected_items = _parse_line_items_from_text(lines)
+        if doc_type in ("Delivery order", "Work done"):
+            items_key = f"{details_key_prefix}_delivery_items"
+            existing_items = st.session_state.get(items_key, [])
+            if detected_items and _items_blank(
+                existing_items, fields=("description", "quantity", "unit_price")
+            ):
+                mapped_items = []
+                for item in detected_items:
+                    mapped_items.append(
+                        {
+                            "description": item.get("description") or "",
+                            "quantity": _coerce_float(item.get("quantity"), 1.0),
+                            "unit_price": _coerce_float(item.get("rate"), 0.0),
+                        }
+                    )
+                st.session_state[items_key] = mapped_items
+        elif doc_type == "Service":
+            items_key = f"{details_key_prefix}_service_items"
+            existing_items = st.session_state.get(items_key, [])
+            if detected_items and _items_blank(
+                existing_items, fields=("description", "quantity", "unit_price")
+            ):
+                mapped_items = []
+                for item in detected_items:
+                    mapped_items.append(
+                        {
+                            "description": item.get("description") or "",
+                            "quantity": _coerce_float(item.get("quantity"), 1.0),
+                            "unit_price": _coerce_float(item.get("rate"), 0.0),
+                        }
+                    )
+                st.session_state[items_key] = mapped_items
+            date_key = f"{details_key_prefix}_service_date"
+            parsed_date = _parse_date_from_text(text_content)
+            if parsed_date and not st.session_state.get(date_key):
+                st.session_state[date_key] = parsed_date
+        else:
+            items_key = f"{details_key_prefix}_maintenance_items"
+            existing_items = st.session_state.get(items_key, [])
+            if detected_items and _items_blank(
+                existing_items, fields=("description", "quantity", "unit_price")
+            ):
+                mapped_items = []
+                for item in detected_items:
+                    mapped_items.append(
+                        {
+                            "description": item.get("description") or "",
+                            "quantity": _coerce_float(item.get("quantity"), 1.0),
+                            "unit_price": _coerce_float(item.get("rate"), 0.0),
+                        }
+                    )
+                st.session_state[items_key] = mapped_items
+            date_key = f"{details_key_prefix}_maintenance_date"
+            parsed_date = _parse_date_from_text(text_content)
+            if parsed_date and not st.session_state.get(date_key):
+                st.session_state[date_key] = parsed_date
 
 
 def _parse_date_from_text(value: str) -> Optional[date]:
@@ -5910,17 +6059,21 @@ def init_ui():
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    st.session_state["ocr_uploads_enabled"] = True
     if "user" not in st.session_state:
         st.session_state.user = None
     if st.session_state.user:
-        st.set_option("client.toolbarMode", "auto")
+        st.set_option("client.toolbarMode", "minimal")
         st.title("PS Engineering – Business Suites")
         st.caption("Customers • Warranties • Needs • Summaries")
         st.markdown(
             """
             <style>
+            #MainMenu,
+            header,
             div[data-testid="stStatusWidget"],
-            div[data-testid="stDecoration"] {
+            div[data-testid="stDecoration"],
+            div[data-testid="stToolbar"] {
                 display: none !important;
             }
             [data-testid="stSidebar"] {
@@ -9759,10 +9912,11 @@ def render_customer_document_uploader(
                 key=f"{key_prefix}_quote_file",
                 help="Upload quotation PDFs or images.",
             )
-            _render_upload_ocr_preview(
-                quote_file,
-                key_prefix=f"{key_prefix}_quote_file",
-                label="Quotation OCR",
+            _apply_ocr_autofill(
+                upload=quote_file,
+                ocr_key_prefix=f"{key_prefix}_quote_file",
+                doc_type="Quotation",
+                details_key_prefix=f"{key_prefix}_quote_details",
             )
             quote_details = _render_doc_detail_inputs(
                 "Quotation",
@@ -9798,10 +9952,11 @@ def render_customer_document_uploader(
                 key=f"{key_prefix}_work_done_file",
                 help="Upload completed work slips or PDFs.",
             )
-            _render_upload_ocr_preview(
-                work_done_file,
-                key_prefix=f"{key_prefix}_work_done_file",
-                label="Work done OCR",
+            _apply_ocr_autofill(
+                upload=work_done_file,
+                ocr_key_prefix=f"{key_prefix}_work_done_file",
+                doc_type="Work done",
+                details_key_prefix=f"{key_prefix}_work_done_details",
             )
             work_done_details = _render_doc_detail_inputs(
                 "Work done",
@@ -9838,10 +9993,11 @@ def render_customer_document_uploader(
                 key=f"{key_prefix}_do_file",
                 help="Upload the delivery order PDF or image.",
             )
-            _render_upload_ocr_preview(
-                do_file,
-                key_prefix=f"{key_prefix}_do_file",
-                label="Delivery order OCR",
+            _apply_ocr_autofill(
+                upload=do_file,
+                ocr_key_prefix=f"{key_prefix}_do_file",
+                doc_type="Delivery order",
+                details_key_prefix=f"{key_prefix}_do_details",
             )
             do_details = _render_doc_detail_inputs(
                 "Delivery order",
@@ -9882,10 +10038,11 @@ def render_customer_document_uploader(
                 key=f"{key_prefix}_service_file",
                 help="Upload service or maintenance documents.",
             )
-            _render_upload_ocr_preview(
-                service_file,
-                key_prefix=f"{key_prefix}_service_file",
-                label=f"{service_choice} OCR",
+            _apply_ocr_autofill(
+                upload=service_file,
+                ocr_key_prefix=f"{key_prefix}_service_file",
+                doc_type=service_choice,
+                details_key_prefix=f"{key_prefix}_service_details",
             )
             service_details = _render_doc_detail_inputs(
                 service_choice,
@@ -10075,7 +10232,7 @@ def customers_page(conn):
             st.session_state["new_customer_products_rows"] = product_entries
             with st.expander("Attachments & advanced details", expanded=True):
                 do_code = st.text_input(
-                    "Delivery order (DO) code",
+                    "Delivery order (DO) code (optional)",
                     key="new_customer_do_code",
                     help="Link the customer to an existing delivery order if available.",
                 )
@@ -10279,14 +10436,6 @@ def customers_page(conn):
                 if not name.strip():
                     errors.append("Customer name is required before saving.")
                 do_serial = clean_text(do_code)
-                if do_pdf is not None and not do_serial:
-                    errors.append(
-                        "Enter a delivery order code before attaching a delivery order PDF."
-                    )
-                if create_delivery_order and not do_serial:
-                    errors.append(
-                        "Enter a delivery order code to create a linked delivery order record."
-                    )
                 work_done_serial = clean_text(work_done_number)
                 if create_work_done and not work_done_serial:
                     errors.append("Work done number is required when creating a record.")
@@ -10499,6 +10648,32 @@ def customers_page(conn):
                                 delivery_total if delivery_items_payload else None,
                                 do_status_value,
                                 do_receipt_path,
+                            ),
+                        )
+                        conn.commit()
+                elif do_pdf is not None and not do_serial:
+                    stored_path = store_uploaded_pdf(
+                        do_pdf,
+                        DELIVERY_ORDER_DIR,
+                        filename=f"customer_{cid}_delivery_order.pdf",
+                    )
+                    if stored_path:
+                        try:
+                            stored_relative = str(Path(stored_path).relative_to(BASE_DIR))
+                        except ValueError:
+                            stored_relative = str(stored_path)
+                        conn.execute(
+                            """
+                            INSERT INTO customer_documents (
+                                customer_id, doc_type, file_path, original_name, uploaded_by
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                int(cid),
+                                "Delivery order",
+                                stored_relative,
+                                Path(do_pdf.name).name,
+                                current_user_id(),
                             ),
                         )
                         conn.commit()
@@ -17170,29 +17345,6 @@ def manual_merge_section(conn, customers_df: pd.DataFrame) -> None:
 
 def duplicates_page(conn):
     st.subheader("⚠️ Possible Duplicates")
-    st.markdown(
-        """
-        <style>
-        [data-testid="stMarkdownContainer"] p,
-        [data-testid="stMarkdownContainer"] label,
-        [data-testid="stMarkdownContainer"] span,
-        [data-testid="stTable"] th,
-        [data-testid="stTable"] td,
-        [data-testid="stDataFrame"] td,
-        [data-testid="stDataFrame"] th,
-        input,
-        textarea,
-        select,
-        .stButton > button {
-            font-size: 12px !important;
-        }
-        .stButton > button {
-            padding: 0.15rem 0.4rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
     if auto_merge_matching_customers(conn):
         st.info(
             "Automatically merged customers sharing the same name and address.",
@@ -17282,10 +17434,7 @@ def duplicates_page(conn):
                 "remarks",
                 "purchase_date_fmt",
                 "product_info",
-                "delivery_order_code",
                 "sales_person",
-                "amount_spent_fmt",
-                "duplicate",
                 "created_at_fmt",
             ]
             if col in preview_df.columns
@@ -17299,11 +17448,9 @@ def duplicates_page(conn):
                         "company_name": "Company",
                         "purchase_date_fmt": "Purchase date",
                         "product_info": "Product",
-                        "delivery_order_code": "DO code",
                         "delivery_address": "Delivery address",
                         "remarks": "Remarks",
                         "sales_person": "Sales person",
-                        "amount_spent_fmt": "Amount spent",
                         "created_at_fmt": "Created",
                     }
                 )
@@ -17340,13 +17487,6 @@ def duplicates_page(conn):
                                     val
                                     for val in g.get("purchase_date_fmt", pd.Series(dtype=object)).tolist()
                                     if val
-                                ]
-                            ),
-                            "DO codes": dedupe_join(
-                                [
-                                    clean_text(val)
-                                    for val in g.get("delivery_order_code", pd.Series(dtype=object)).tolist()
-                                    if clean_text(val)
                                 ]
                             ),
                             "Created": dedupe_join(
@@ -17391,30 +17531,17 @@ def duplicates_page(conn):
             editor_df["created_at"] = pd.to_datetime(editor_df["created_at"], errors="coerce")
             editor_df["Action"] = "Keep"
             st.markdown("#### Edit duplicate entries")
-            doc_type_options = [
-                "Delivery order",
-                "Work done",
-                "Quotation",
-                "Service",
-                "Maintenance",
-                "Other",
-            ]
             header_cols = st.columns(
                 (
-                    1.2,
-                    1.2,
-                    1.1,
-                    1.5,
-                    1.5,
-                    1.3,
+                    1.4,
                     1.2,
                     1.1,
-                    1.5,
+                    1.6,
+                    1.6,
+                    1.4,
                     1.1,
                     1.1,
-                    0.9,
-                    1.1,
-                    1.1,
+                    1.6,
                     0.9,
                 )
             )
@@ -17427,12 +17554,7 @@ def duplicates_page(conn):
             header_cols[6].write("**Sales person**")
             header_cols[7].write("**Purchase date**")
             header_cols[8].write("**Product**")
-            header_cols[9].write("**DO code**")
-            header_cols[10].write("**Amount**")
-            header_cols[11].write("**Duplicate**")
-            header_cols[12].write("**File type**")
-            header_cols[13].write("**➕ Upload**")
-            header_cols[14].write("**Action**")
+            header_cols[9].write("**Action**")
             editor_rows = []
             for _, row in editor_df.iterrows():
                 cid = int_or_none(row.get("id"))
@@ -17440,20 +17562,15 @@ def duplicates_page(conn):
                     continue
                 row_cols = st.columns(
                     (
-                        1.2,
-                        1.2,
-                        1.1,
-                        1.5,
-                        1.5,
-                        1.3,
+                        1.4,
                         1.2,
                         1.1,
-                        1.5,
+                        1.6,
+                        1.6,
+                        1.4,
                         1.1,
                         1.1,
-                        0.9,
-                        1.1,
-                        1.1,
+                        1.6,
                         0.9,
                     )
                 )
@@ -17466,11 +17583,6 @@ def duplicates_page(conn):
                 sales_key = f"dup_sales_{cid}"
                 purchase_key = f"dup_purchase_{cid}"
                 product_key = f"dup_product_{cid}"
-                do_key = f"dup_do_{cid}"
-                amount_key = f"dup_amount_{cid}"
-                file_type_key = f"dup_file_type_{cid}"
-                upload_key = f"dup_upload_{cid}"
-                upload_btn_key = f"dup_upload_btn_{cid}"
                 action_key = f"dup_action_{cid}"
                 purchase_date_value = row.get("purchase_date")
                 purchase_date_label = ""
@@ -17530,77 +17642,7 @@ def duplicates_page(conn):
                     key=product_key,
                     label_visibility="collapsed",
                 )
-                row_cols[9].text_input(
-                    "DO code",
-                    value=clean_text(row.get("delivery_order_code")) or "",
-                    key=do_key,
-                    label_visibility="collapsed",
-                )
-                row_cols[10].text_input(
-                    "Amount",
-                    value=clean_text(row.get("amount_spent")) or "",
-                    key=amount_key,
-                    label_visibility="collapsed",
-                )
-                row_cols[11].write("🔁 duplicate phone")
-                row_cols[12].selectbox(
-                    "File type",
-                    options=doc_type_options,
-                    key=file_type_key,
-                    label_visibility="collapsed",
-                )
-                upload_file = row_cols[13].file_uploader(
-                    "Upload document",
-                    type=["pdf", "png", "jpg", "jpeg", "webp"],
-                    key=upload_key,
-                    label_visibility="collapsed",
-                )
-                if row_cols[13].button("➕", key=upload_btn_key, help="Upload document"):
-                    if upload_file is None:
-                        st.warning("Select a file to upload.")
-                    else:
-                        doc_type = st.session_state.get(file_type_key) or "Other"
-                        doc_type_slug = (
-                            _sanitize_path_component(doc_type.lower().replace(" ", "_"))
-                            or "document"
-                        )
-                        target_dir = CUSTOMER_DOCS_DIR / doc_type_slug
-                        target_dir.mkdir(parents=True, exist_ok=True)
-                        original_name = upload_file.name or f"{doc_type_slug}_{cid}.pdf"
-                        safe_original = Path(original_name).name
-                        filename = f"{doc_type_slug}_{cid}_{safe_original}"
-                        saved_path = save_uploaded_file(
-                            upload_file,
-                            target_dir,
-                            filename=filename,
-                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                            default_extension=".pdf",
-                        )
-                        if saved_path:
-                            try:
-                                stored_path = str(saved_path.relative_to(BASE_DIR))
-                            except ValueError:
-                                stored_path = str(saved_path)
-                            conn.execute(
-                                """
-                                INSERT INTO customer_documents (
-                                    customer_id, doc_type, file_path, original_name, uploaded_by
-                                ) VALUES (?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    cid,
-                                    doc_type,
-                                    stored_path,
-                                    safe_original,
-                                    current_user_id(),
-                                ),
-                            )
-                            conn.commit()
-                            st.success("Document uploaded.")
-                            _safe_rerun()
-                        else:
-                            st.error("Unable to save the uploaded file.")
-                row_cols[14].selectbox(
+                row_cols[9].selectbox(
                     "Action",
                     options=["Keep", "Delete"],
                     key=action_key,
@@ -17618,8 +17660,6 @@ def duplicates_page(conn):
                         "sales_person": st.session_state.get(sales_key),
                         "purchase_date": st.session_state.get(purchase_key),
                         "product_info": st.session_state.get(product_key),
-                        "delivery_order_code": st.session_state.get(do_key),
-                        "amount_spent": st.session_state.get(amount_key),
                         "Action": st.session_state.get(action_key),
                     }
                 )
@@ -17656,10 +17696,8 @@ def duplicates_page(conn):
                         new_delivery_address = clean_text(row.get("delivery_address"))
                         new_remarks = clean_text(row.get("remarks"))
                         new_sales_person = clean_text(row.get("sales_person"))
-                        new_amount = parse_amount(row.get("amount_spent"))
                         purchase_str, _ = date_strings_from_input(row.get("purchase_date"))
                         product_label = clean_text(row.get("product_info"))
-                        new_do = clean_text(row.get("delivery_order_code"))
                         original_row = raw_map[cid]
                         old_name = clean_text(original_row.get("name"))
                         old_company = clean_text(original_row.get("company_name"))
@@ -17668,10 +17706,12 @@ def duplicates_page(conn):
                         old_delivery_address = clean_text(original_row.get("delivery_address"))
                         old_remarks = clean_text(original_row.get("remarks"))
                         old_sales_person = clean_text(original_row.get("sales_person"))
-                        old_amount = parse_amount(original_row.get("amount_spent"))
                         old_purchase = clean_text(original_row.get("purchase_date"))
                         old_product = clean_text(original_row.get("product_info"))
+                        old_amount = parse_amount(original_row.get("amount_spent"))
                         old_do = clean_text(original_row.get("delivery_order_code"))
+                        new_amount = old_amount
+                        new_do = old_do
                         if (
                             new_name == old_name
                             and new_company == old_company
@@ -17680,10 +17720,8 @@ def duplicates_page(conn):
                             and new_delivery_address == old_delivery_address
                             and new_remarks == old_remarks
                             and new_sales_person == old_sales_person
-                            and new_amount == old_amount
                             and purchase_str == old_purchase
                             and product_label == old_product
-                            and new_do == old_do
                         ):
                             continue
                         conn.execute(
@@ -17801,6 +17839,16 @@ def duplicates_page(conn):
             warr[warr["dup_flag"] == 1].drop(columns=["id", "dup_flag"], errors="ignore"),
             use_container_width=True,
         )
+
+
+def scraps_duplicates_page(conn):
+    tabs = st.tabs(["Scraps", "Duplicates"])
+    with tabs[0]:
+        scraps_page(conn)
+    with tabs[1]:
+        duplicates_page(conn)
+
+
 def users_admin_page(conn):
     ensure_auth(role="admin")
     st.subheader("👤 Users (Admin)")
@@ -19983,11 +20031,10 @@ def main():
             "Customers",
             "Operations",
             "Quotation",
-            "Scraps",
             "Warranties",
             "Advanced Search",
             "Reports",
-            "Duplicates",
+            "Scraps & Duplicates",
             "Users (Admin)",
         ]
     else:
@@ -19998,6 +20045,7 @@ def main():
             "Quotation",
             "Warranties",
             "Reports",
+            "Scraps & Duplicates",
         ]
 
     if "nav_page" not in st.session_state:
@@ -20027,12 +20075,6 @@ def main():
         )
         set_theme(sidebar_dark)
         apply_theme_css()
-        st.toggle(
-            "Auto OCR uploads",
-            value=st.session_state.get("ocr_uploads_enabled", True),
-            key="ocr_uploads_enabled",
-            help="Automatically detect text from uploaded PDFs and images.",
-        )
         st.markdown("### Navigation")
         st.radio(
             "Navigate",
@@ -20057,16 +20099,14 @@ def main():
         quotation_page(conn, render_id=render_id)
     elif page == "Customers":
         customers_hub_page(conn)
-    elif page == "Scraps":
-        scraps_page(conn)
     elif page == "Warranties":
         warranties_page(conn)
     elif page == "Advanced Search":
         advanced_search_page(conn)
     elif page == "Reports":
         reports_page(conn)
-    elif page == "Duplicates":
-        duplicates_page(conn)
+    elif page == "Scraps & Duplicates":
+        scraps_duplicates_page(conn)
     elif page == "Users (Admin)":
         users_admin_page(conn)
 
