@@ -8637,32 +8637,33 @@ def render_customer_quick_edit_section(
         else:
             upload_panel = upload_target.expander("Upload", expanded=False)
         with upload_panel:
-            doc_type = st.selectbox(
-                "Document type",
-                options=doc_type_options,
-                key=file_type_key,
-            )
-            upload_file = st.file_uploader(
-                "Upload document",
-                type=None,
-                accept_multiple_files=False,
-                key=upload_key,
-            )
-            details = _render_doc_detail_inputs(
-                doc_type,
-                key_prefix=f"{upload_key}_details",
-                defaults=row,
-            )
-            doc_type_emoji = {
-                "Delivery order": "🚚",
-                "Work done": "✅",
-                "Quotation": "🧾",
-                "Service": "🛠️",
-                "Maintenance": "🧰",
-                "Other": "📎",
-            }
-            upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
-            upload_clicked = st.button(upload_label, key=upload_btn_key)
+            with st.form(f"{upload_key}_form"):
+                doc_type = st.selectbox(
+                    "Document type",
+                    options=doc_type_options,
+                    key=file_type_key,
+                )
+                upload_file = st.file_uploader(
+                    "Upload document",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=upload_key,
+                )
+                details = _render_doc_detail_inputs(
+                    doc_type,
+                    key_prefix=f"{upload_key}_details",
+                    defaults=row,
+                )
+                doc_type_emoji = {
+                    "Delivery order": "🚚",
+                    "Work done": "✅",
+                    "Quotation": "🧾",
+                    "Service": "🛠️",
+                    "Maintenance": "🧰",
+                    "Other": "📎",
+                }
+                upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
+                upload_clicked = st.form_submit_button(upload_label)
             if _guard_double_submit(upload_btn_key, upload_clicked):
                 if upload_file is None:
                     st.warning("Select a file to upload.")
