@@ -161,16 +161,6 @@ SERVICE_REPORT_FIELDS = OrderedDict(
             },
         ),
         (
-            "bill_tk",
-            {
-                "label": "Bill TK",
-                "type": "number",
-                "format": "%.2f",
-                "step": 100.0,
-                "help": "Billed amount in Taka.",
-            },
-        ),
-        (
             "work_done_date",
             {
                 "label": "Work Done Date",
@@ -1593,12 +1583,9 @@ def upcoming_warranty_projection(conn, months_ahead: int = 6) -> pd.DataFrame:
                    COUNT(*) AS total
             FROM warranties w
             LEFT JOIN customers c ON c.customer_id = w.customer_id
-            LEFT JOIN products p ON p.product_id = w.product_id
             WHERE w.status='active'
               AND w.expiry_date IS NOT NULL
               AND date(w.expiry_date) BETWEEN date(?) AND date(?)
-              AND p.name IS NOT NULL
-              AND TRIM(p.name) != ''
               {scope_filter}
             GROUP BY month_bucket
             ORDER BY month_bucket
@@ -1790,6 +1777,59 @@ def _extract_text_from_quotation_upload(upload) -> tuple[str, list[str]]:
         text_content = _ocr_image(image)
 
     return text_content, warnings
+
+
+OCR_UPLOAD_SUFFIXES = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".gif",
+    ".tif",
+    ".tiff",
+}
+
+
+def _ocr_uploads_enabled() -> bool:
+    return bool(st.session_state.get("ocr_uploads_enabled", True))
+
+
+def _render_upload_ocr_preview(
+    upload,
+    *,
+    key_prefix: str,
+    label: str = "Auto-detected text (OCR)",
+) -> None:
+    if upload is None or not _ocr_uploads_enabled():
+        return
+    suffix = Path(upload.name).suffix.lower() if getattr(upload, "name", None) else ""
+    if suffix not in OCR_UPLOAD_SUFFIXES:
+        return
+    token = f"{getattr(upload, 'name', '')}:{getattr(upload, 'size', '')}"
+    token_key = f"{key_prefix}_ocr_token"
+    text_key = f"{key_prefix}_ocr_text"
+    warnings_key = f"{key_prefix}_ocr_warnings"
+    if st.session_state.get(token_key) != token:
+        text_content, warnings = _extract_text_from_quotation_upload(upload)
+        st.session_state[token_key] = token
+        st.session_state[text_key] = text_content
+        st.session_state[warnings_key] = warnings
+    text_content = clean_text(st.session_state.get(text_key)) or ""
+    warnings = st.session_state.get(warnings_key, [])
+    if not text_content and not warnings:
+        return
+    with st.expander(label):
+        if warnings:
+            for warning in warnings:
+                st.warning(warning, icon="⚠️")
+        if text_content:
+            st.text_area(
+                "Extracted text",
+                value=text_content,
+                height=200,
+                key=f"{key_prefix}_ocr_text_area",
+            )
 
 
 def _parse_date_from_text(value: str) -> Optional[date]:
@@ -2219,7 +2259,12 @@ def _build_staff_alerts(conn, *, user_id: Optional[int]) -> list[dict[str, objec
                 if pd.isna(reminder_dt):
                     continue
                 reminder_date = reminder_dt.date()
-                customer_label = clean_text(entry.get("client_name")) or "Follow-up"
+                customer_label = (
+                    clean_text(entry.get("client_name"))
+                    or clean_text(entry.get("product_detail"))
+                    or clean_text(entry.get("contact"))
+                    or "Follow-up"
+                )
                 message = clean_text(entry.get("notes")) or "Follow-up reminder"
                 follow_up_reminders.append(
                     (
@@ -9714,6 +9759,11 @@ def render_customer_document_uploader(
                 key=f"{key_prefix}_quote_file",
                 help="Upload quotation PDFs or images.",
             )
+            _render_upload_ocr_preview(
+                quote_file,
+                key_prefix=f"{key_prefix}_quote_file",
+                label="Quotation OCR",
+            )
             quote_details = _render_doc_detail_inputs(
                 "Quotation",
                 key_prefix=f"{key_prefix}_quote_details",
@@ -9747,6 +9797,11 @@ def render_customer_document_uploader(
                 accept_multiple_files=False,
                 key=f"{key_prefix}_work_done_file",
                 help="Upload completed work slips or PDFs.",
+            )
+            _render_upload_ocr_preview(
+                work_done_file,
+                key_prefix=f"{key_prefix}_work_done_file",
+                label="Work done OCR",
             )
             work_done_details = _render_doc_detail_inputs(
                 "Work done",
@@ -9782,6 +9837,11 @@ def render_customer_document_uploader(
                 accept_multiple_files=False,
                 key=f"{key_prefix}_do_file",
                 help="Upload the delivery order PDF or image.",
+            )
+            _render_upload_ocr_preview(
+                do_file,
+                key_prefix=f"{key_prefix}_do_file",
+                label="Delivery order OCR",
             )
             do_details = _render_doc_detail_inputs(
                 "Delivery order",
@@ -9821,6 +9881,11 @@ def render_customer_document_uploader(
                 accept_multiple_files=False,
                 key=f"{key_prefix}_service_file",
                 help="Upload service or maintenance documents.",
+            )
+            _render_upload_ocr_preview(
+                service_file,
+                key_prefix=f"{key_prefix}_service_file",
+                label=f"{service_choice} OCR",
             )
             service_details = _render_doc_detail_inputs(
                 service_choice,
@@ -11385,11 +11450,23 @@ def _render_service_section(conn, *, show_heading: bool = True):
             accept_multiple_files=True,
             key="service_new_docs",
         )
+        if service_files:
+            for idx, service_file in enumerate(service_files, start=1):
+                _render_upload_ocr_preview(
+                    service_file,
+                    key_prefix=f"service_new_docs_{idx}",
+                    label=f"Service document {idx} OCR",
+                )
         bill_file = st.file_uploader(
             "Upload bill / invoice (PDF)",
             type=["pdf"],
             key="service_new_bill_file",
             help="Store the supporting invoice for this service.",
+        )
+        _render_upload_ocr_preview(
+            bill_file,
+            key_prefix="service_new_bill_file",
+            label="Service bill OCR",
         )
         submit = st.form_submit_button("Log service", type="primary")
 
@@ -14366,6 +14443,13 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             accept_multiple_files=True,
             key="maintenance_new_docs",
         )
+        if maintenance_files:
+            for idx, maintenance_file in enumerate(maintenance_files, start=1):
+                _render_upload_ocr_preview(
+                    maintenance_file,
+                    key_prefix=f"maintenance_new_docs_{idx}",
+                    label=f"Maintenance document {idx} OCR",
+                )
         submit = st.form_submit_button("Log maintenance", type="primary")
 
     if submit:
@@ -14806,6 +14890,9 @@ def _reset_delivery_order_form_state() -> None:
     st.session_state["delivery_order_status"] = "due"
     for key in ("do_form_loader", "delivery_order_items_editor"):
         st.session_state.pop(key, None)
+    for record_key in ("delivery_order", "work_done"):
+        st.session_state.pop(f"{record_key}_receipt_upload", None)
+        st.session_state.pop(f"{record_key}_document_upload", None)
 
 
 DELIVERY_STATUS_OPTIONS = ["due", "advanced", "paid"]
@@ -14958,10 +15045,9 @@ def delivery_orders_page(
         elif selected_customer_state is None:
             st.session_state[autofill_customer_key] = None
 
-    with st.form("delivery_order_form"):
+    with st.form("delivery_order_form", clear_on_submit=True):
         do_number = st.text_input(
             f"{record_label} number *",
-            value=st.session_state.get("delivery_order_number", ""),
             key="delivery_order_number",
         )
         selected_customer = st.selectbox(
@@ -14972,12 +15058,10 @@ def delivery_orders_page(
         )
         description = st.text_area(
             "Description / items",
-            value=st.session_state.get("delivery_order_description", ""),
             key="delivery_order_description",
         )
         remarks = st.text_area(
             "Remarks",
-            value=st.session_state.get("delivery_order_remarks", ""),
             key="delivery_order_remarks",
         )
         status_value = st.selectbox(
@@ -15007,8 +15091,13 @@ def delivery_orders_page(
             receipt_upload = st.file_uploader(
                 receipt_label,
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{record_label.lower().replace(' ', '_')}_receipt_upload",
+                key=f"{record_type_key}_receipt_upload",
                 help=receipt_help,
+            )
+            _render_upload_ocr_preview(
+                receipt_upload,
+                key_prefix=f"{record_type_key}_receipt",
+                label=f"{record_label} receipt OCR",
             )
             if current_receipt_path:
                 receipt_file = resolve_upload_path(current_receipt_path)
@@ -15060,6 +15149,12 @@ def delivery_orders_page(
             f"Attach {record_label.lower()} (PDF)",
             type=["pdf"],
             help="Optional supporting document stored alongside the record.",
+            key=f"{record_type_key}_document_upload",
+        )
+        _render_upload_ocr_preview(
+            do_file,
+            key_prefix=f"{record_type_key}_document",
+            label=f"{record_label} document OCR",
         )
         submit = st.form_submit_button(f"Save {record_label_lower}", type="primary")
 
@@ -15256,8 +15351,8 @@ def delivery_orders_page(
                 entity_id=None,
             )
 
+            _reset_delivery_order_form_state()
             st.success(f"{record_label} {cleaned_number} saved successfully.")
-            _safe_rerun()
 
     number_label = f"{record_label} number"
     st.markdown(f"### {record_label} search")
@@ -15396,11 +15491,21 @@ def delivery_orders_page(
                 label_visibility="collapsed",
                 key=f"do_row_doc_upload_{row_key}",
             )
+            _render_upload_ocr_preview(
+                upload_doc,
+                key_prefix=f"do_row_doc_upload_{row_key}",
+                label=f"{record_label} row document OCR",
+            )
             upload_receipt = row_cols[8].file_uploader(
                 "Upload receipt",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 label_visibility="collapsed",
                 key=f"do_row_receipt_upload_{row_key}",
+            )
+            _render_upload_ocr_preview(
+                upload_receipt,
+                key_prefix=f"do_row_receipt_upload_{row_key}",
+                label=f"{record_label} row receipt OCR",
             )
             save_label = f"💾 Save {record_label}"
             save_doc = row_cols[7].button(
@@ -17065,6 +17170,29 @@ def manual_merge_section(conn, customers_df: pd.DataFrame) -> None:
 
 def duplicates_page(conn):
     st.subheader("⚠️ Possible Duplicates")
+    st.markdown(
+        """
+        <style>
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] label,
+        [data-testid="stMarkdownContainer"] span,
+        [data-testid="stTable"] th,
+        [data-testid="stTable"] td,
+        [data-testid="stDataFrame"] td,
+        [data-testid="stDataFrame"] th,
+        input,
+        textarea,
+        select,
+        .stButton > button {
+            font-size: 12px !important;
+        }
+        .stButton > button {
+            padding: 0.15rem 0.4rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     if auto_merge_matching_customers(conn):
         st.info(
             "Automatically merged customers sharing the same name and address.",
@@ -17273,7 +17401,6 @@ def duplicates_page(conn):
             ]
             header_cols = st.columns(
                 (
-                    0.6,
                     1.2,
                     1.2,
                     1.1,
@@ -17291,22 +17418,21 @@ def duplicates_page(conn):
                     0.9,
                 )
             )
-            header_cols[0].write("**ID**")
-            header_cols[1].write("**Name**")
-            header_cols[2].write("**Company**")
-            header_cols[3].write("**Phone**")
-            header_cols[4].write("**Address**")
-            header_cols[5].write("**Delivery address**")
-            header_cols[6].write("**Remarks**")
-            header_cols[7].write("**Sales person**")
-            header_cols[8].write("**Purchase date**")
-            header_cols[9].write("**Product**")
-            header_cols[10].write("**DO code**")
-            header_cols[11].write("**Amount**")
-            header_cols[12].write("**Duplicate**")
-            header_cols[13].write("**File type**")
-            header_cols[14].write("**➕ Upload**")
-            header_cols[15].write("**Action**")
+            header_cols[0].write("**Name**")
+            header_cols[1].write("**Company**")
+            header_cols[2].write("**Phone**")
+            header_cols[3].write("**Address**")
+            header_cols[4].write("**Delivery address**")
+            header_cols[5].write("**Remarks**")
+            header_cols[6].write("**Sales person**")
+            header_cols[7].write("**Purchase date**")
+            header_cols[8].write("**Product**")
+            header_cols[9].write("**DO code**")
+            header_cols[10].write("**Amount**")
+            header_cols[11].write("**Duplicate**")
+            header_cols[12].write("**File type**")
+            header_cols[13].write("**➕ Upload**")
+            header_cols[14].write("**Action**")
             editor_rows = []
             for _, row in editor_df.iterrows():
                 cid = int_or_none(row.get("id"))
@@ -17314,7 +17440,6 @@ def duplicates_page(conn):
                     continue
                 row_cols = st.columns(
                     (
-                        0.6,
                         1.2,
                         1.2,
                         1.1,
@@ -17332,7 +17457,6 @@ def duplicates_page(conn):
                         0.9,
                     )
                 )
-                row_cols[0].write(cid)
                 name_key = f"dup_name_{cid}"
                 company_key = f"dup_company_{cid}"
                 phone_key = f"dup_phone_{cid}"
@@ -17352,86 +17476,86 @@ def duplicates_page(conn):
                 purchase_date_label = ""
                 if isinstance(purchase_date_value, pd.Timestamp) and not pd.isna(purchase_date_value):
                     purchase_date_label = purchase_date_value.strftime(DATE_FMT)
-                row_cols[1].text_input(
+                row_cols[0].text_input(
                     "Name",
                     value=clean_text(row.get("name")) or "",
                     key=name_key,
                     label_visibility="collapsed",
                 )
-                row_cols[2].text_input(
+                row_cols[1].text_input(
                     "Company",
                     value=clean_text(row.get("company_name")) or "",
                     key=company_key,
                     label_visibility="collapsed",
                 )
-                row_cols[3].text_input(
+                row_cols[2].text_input(
                     "Phone",
                     value=clean_text(row.get("phone")) or "",
                     key=phone_key,
                     label_visibility="collapsed",
                 )
-                row_cols[4].text_input(
+                row_cols[3].text_input(
                     "Address",
                     value=clean_text(row.get("address")) or "",
                     key=address_key,
                     label_visibility="collapsed",
                 )
-                row_cols[5].text_input(
+                row_cols[4].text_input(
                     "Delivery address",
                     value=clean_text(row.get("delivery_address")) or "",
                     key=delivery_address_key,
                     label_visibility="collapsed",
                 )
-                row_cols[6].text_input(
+                row_cols[5].text_input(
                     "Remarks",
                     value=clean_text(row.get("remarks")) or "",
                     key=remarks_key,
                     label_visibility="collapsed",
                 )
-                row_cols[7].text_input(
+                row_cols[6].text_input(
                     "Sales person",
                     value=clean_text(row.get("sales_person")) or "",
                     key=sales_key,
                     label_visibility="collapsed",
                 )
-                row_cols[8].text_input(
+                row_cols[7].text_input(
                     "Purchase date",
                     value=purchase_date_label,
                     key=purchase_key,
                     label_visibility="collapsed",
                 )
-                row_cols[9].text_input(
+                row_cols[8].text_input(
                     "Product",
                     value=clean_text(row.get("product_info")) or "",
                     key=product_key,
                     label_visibility="collapsed",
                 )
-                row_cols[10].text_input(
+                row_cols[9].text_input(
                     "DO code",
                     value=clean_text(row.get("delivery_order_code")) or "",
                     key=do_key,
                     label_visibility="collapsed",
                 )
-                row_cols[11].text_input(
+                row_cols[10].text_input(
                     "Amount",
                     value=clean_text(row.get("amount_spent")) or "",
                     key=amount_key,
                     label_visibility="collapsed",
                 )
-                row_cols[12].write("🔁 duplicate phone")
-                row_cols[13].selectbox(
+                row_cols[11].write("🔁 duplicate phone")
+                row_cols[12].selectbox(
                     "File type",
                     options=doc_type_options,
                     key=file_type_key,
                     label_visibility="collapsed",
                 )
-                upload_file = row_cols[14].file_uploader(
+                upload_file = row_cols[13].file_uploader(
                     "Upload document",
                     type=["pdf", "png", "jpg", "jpeg", "webp"],
                     key=upload_key,
                     label_visibility="collapsed",
                 )
-                if row_cols[14].button("➕", key=upload_btn_key, help="Upload document"):
+                if row_cols[13].button("➕", key=upload_btn_key, help="Upload document"):
                     if upload_file is None:
                         st.warning("Select a file to upload.")
                     else:
@@ -17476,7 +17600,7 @@ def duplicates_page(conn):
                             _safe_rerun()
                         else:
                             st.error("Unable to save the uploaded file.")
-                row_cols[15].selectbox(
+                row_cols[14].selectbox(
                     "Action",
                     options=["Keep", "Delete"],
                     key=action_key,
@@ -18957,9 +19081,7 @@ def reports_page(conn):
             if owner_id < 0:
                 owner_id = None
         owner_label = label_map.get(owner_id, f"User #{owner_id}") if owner_id else None
-        can_delete = is_admin or (
-            owner_id is not None and viewer_id is not None and owner_id == viewer_id
-        )
+        can_delete = is_admin
         if can_delete:
             with st.expander("Delete report", expanded=False):
                 st.warning(
@@ -19325,6 +19447,25 @@ def reports_page(conn):
         fields = _get_report_grid_fields(template_key)
         grid_df_seed = pd.DataFrame(editor_seed, columns=fields.keys())
         column_config = _build_report_column_config(fields)
+        disabled_columns: list[str] = []
+        if editing_record and not is_admin:
+            if template_key in {"service", "sales"}:
+                editable_columns = {"details_remarks"}
+                helper_label = "Staff can update only the remarks column for existing reports."
+            elif template_key == "follow_up":
+                editable_columns = {"notes", "reminder_date"}
+                helper_label = (
+                    "Staff can update only the remarks and reminder date columns for existing follow-up reports."
+                )
+            else:
+                editable_columns = set()
+                helper_label = ""
+            if editable_columns:
+                disabled_columns = [
+                    key for key in fields.keys() if key not in editable_columns
+                ]
+                if helper_label:
+                    st.info(helper_label, icon="📝")
         if template_key == "service":
             customer_df = df_query(
                 conn,
@@ -19355,6 +19496,7 @@ def reports_page(conn):
             hide_index=True,
             num_rows="dynamic",
             use_container_width=True,
+            disabled=disabled_columns,
             key="report_grid_editor",
         )
         st.session_state["report_grid_editor_state"] = _grid_rows_from_editor(
@@ -19372,6 +19514,11 @@ def reports_page(conn):
             type=["pdf", "png", "jpg", "jpeg", "webp", "gif", "xlsx", "xls"],
             key="report_attachment_uploader",
             help="Optional proof of work, photos, or documentation. Excel uploads are supported for imported reports.",
+        )
+        _render_upload_ocr_preview(
+            attachment_upload,
+            key_prefix="report_attachment_uploader",
+            label="Report attachment OCR",
         )
         submitted = st.form_submit_button("Save report", type="primary")
 
@@ -19866,7 +20013,10 @@ def main():
         st.session_state["nav_page"] = selection
         st.session_state["page"] = selection
 
-    st.session_state["nav_selection_sidebar"] = current_page
+    if "nav_selection_sidebar" not in st.session_state:
+        st.session_state["nav_selection_sidebar"] = current_page
+    elif st.session_state.get("nav_selection_sidebar") not in pages:
+        st.session_state["nav_selection_sidebar"] = current_page
 
     with st.sidebar:
         sidebar_dark = st.toggle(
@@ -19877,11 +20027,16 @@ def main():
         )
         set_theme(sidebar_dark)
         apply_theme_css()
+        st.toggle(
+            "Auto OCR uploads",
+            value=st.session_state.get("ocr_uploads_enabled", True),
+            key="ocr_uploads_enabled",
+            help="Automatically detect text from uploaded PDFs and images.",
+        )
         st.markdown("### Navigation")
         st.radio(
             "Navigate",
             pages,
-            index=pages.index(current_page),
             key="nav_selection_sidebar",
             on_change=lambda: _sync_nav_choice("nav_selection_sidebar"),
         )
