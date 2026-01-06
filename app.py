@@ -8578,6 +8578,8 @@ def render_customer_quick_edit_section(
             value=purchase_date_label,
             key=purchase_key,
             label_visibility="collapsed",
+            disabled=not is_admin,
+            help="Only admins can edit the purchase date.",
         )
         row_cols[row_idx + 7].text_input(
             "Product",
@@ -9044,13 +9046,12 @@ def _render_doc_detail_inputs(
             value=user_label,
             key=f"{key_prefix}_quotation_person_in_charge",
         )
-        details["receipt_upload"] = None
-        if details["payment_status"] == "paid":
-            details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for paid)",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{key_prefix}_quotation_receipt",
-            )
+        details["receipt_upload"] = st.file_uploader(
+            "Payment receipt (required for paid)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_quotation_receipt",
+            help="Attach the receipt when marking this quotation as paid.",
+        )
     elif doc_type in ("Delivery order", "Work done"):
         items_key = f"{key_prefix}_delivery_items"
         st.session_state.setdefault(items_key, _default_simple_items())
@@ -9112,28 +9113,21 @@ def _render_doc_detail_inputs(
         )
         details["advance_receipt_upload"] = None
         details["receipt_upload"] = None
-        if details["status"] == "advanced":
-            details["receipt_upload"] = st.file_uploader(
-                "Advance receipt (required for advanced)",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{key_prefix}_do_advance_receipt",
-            )
-        elif details["status"] == "paid":
-            details["advance_taken"] = st.checkbox(
-                "Advance payment was received",
-                key=f"{key_prefix}_do_advance_taken",
-            )
-            if details["advance_taken"]:
-                details["advance_receipt_upload"] = st.file_uploader(
-                    "Advance receipt (required)",
-                    type=["pdf", "png", "jpg", "jpeg", "webp"],
-                    key=f"{key_prefix}_do_advance_receipt_paid",
-                )
-            details["receipt_upload"] = st.file_uploader(
-                "Full payment receipt (required for paid)",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{key_prefix}_do_receipt",
-            )
+        details["advance_taken"] = st.checkbox(
+            "Advance payment was received",
+            key=f"{key_prefix}_do_advance_taken",
+            help="Enable if an advance receipt should be attached.",
+        )
+        details["advance_receipt_upload"] = st.file_uploader(
+            "Advance receipt (required for advanced / if advance taken)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_do_advance_receipt",
+        )
+        details["receipt_upload"] = st.file_uploader(
+            "Full payment receipt (required for paid)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_do_receipt",
+        )
     elif doc_type == "Service":
         items_key = f"{key_prefix}_service_items"
         st.session_state.setdefault(items_key, _default_simple_items())
@@ -9193,13 +9187,11 @@ def _render_doc_detail_inputs(
             value=user_label,
             key=f"{key_prefix}_service_person_in_charge",
         )
-        details["receipt_upload"] = None
-        if details["payment_status"] in {"advanced", "paid"}:
-            details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for advance/paid)",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{key_prefix}_service_receipt",
-            )
+        details["receipt_upload"] = st.file_uploader(
+            "Payment receipt (required for advance/paid)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_service_receipt",
+        )
     elif doc_type == "Maintenance":
         items_key = f"{key_prefix}_maintenance_items"
         st.session_state.setdefault(items_key, _default_simple_items())
@@ -9259,13 +9251,11 @@ def _render_doc_detail_inputs(
             value=user_label,
             key=f"{key_prefix}_maintenance_person_in_charge",
         )
-        details["receipt_upload"] = None
-        if details["payment_status"] in {"advanced", "paid"}:
-            details["receipt_upload"] = st.file_uploader(
-                "Payment receipt (required for advance/paid)",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                key=f"{key_prefix}_maintenance_receipt",
-            )
+        details["receipt_upload"] = st.file_uploader(
+            "Payment receipt (required for advance/paid)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_maintenance_receipt",
+        )
     return details
 
 
@@ -9286,7 +9276,7 @@ def _save_customer_document_upload(
             st.error("Provide a delivery/work done number before saving.")
             return False
         status_value = normalize_delivery_status(details.get("status"))
-        if status_value == "advanced" and details.get("receipt_upload") is None:
+        if status_value == "advanced" and details.get("advance_receipt_upload") is None:
             st.error("Upload a receipt before marking this as advanced.")
             return False
         if status_value == "paid":
@@ -9425,12 +9415,15 @@ def _save_customer_document_upload(
         status_value = normalize_delivery_status(details.get("status"))
         receipt_path = None
         receipt_upload = details.get("receipt_upload")
+        advance_receipt_upload = details.get("advance_receipt_upload")
+        if status_value == "advanced" and advance_receipt_upload is not None:
+            receipt_upload = advance_receipt_upload
         if receipt_upload is not None:
             receipt_path = store_payment_receipt(
                 receipt_upload,
                 identifier=f"{_sanitize_path_component(do_number)}_receipt",
+                target_dir=DELIVERY_RECEIPT_DIR,
             )
-        advance_receipt_upload = details.get("advance_receipt_upload")
         if advance_receipt_upload is not None:
             advance_path = store_payment_receipt(
                 advance_receipt_upload,
