@@ -1506,6 +1506,53 @@ def format_metric_delta(current: int, previous: int) -> str:
     return f"{diff:+d} ({pct:+.1f}%) vs last month"
 
 
+def sales_scope_filter(alias: str = "d") -> tuple[str, tuple[object, ...]]:
+    if current_user_is_admin():
+        return "", ()
+    user_id = current_user_id()
+    if user_id is None:
+        return "1=0", ()
+    prefix = f"{alias}." if alias else ""
+    return f"({prefix}created_by = ? OR c.created_by = ?)", (user_id, user_id)
+
+
+def fetch_sales_metrics(conn, scope_clause: str, scope_params: tuple[object, ...]) -> dict[str, float]:
+    base_filters = [
+        "d.deleted_at IS NULL",
+        "COALESCE(d.record_type, 'delivery_order') IN ('delivery_order', 'work_done')",
+        "d.status = 'paid'",
+        "d.total_amount IS NOT NULL",
+    ]
+    if scope_clause:
+        base_filters.append(scope_clause)
+    base_where = " AND ".join(base_filters)
+
+    def _sum_for(where_clause: str, params: tuple[object, ...]) -> float:
+        query = dedent(
+            f"""
+            SELECT COALESCE(SUM(d.total_amount), 0) AS total
+            FROM delivery_orders d
+            LEFT JOIN customers c ON c.customer_id = d.customer_id
+            WHERE {base_where} AND {where_clause}
+            """
+        )
+        row = conn.execute(query, params).fetchone()
+        return float(row[0] or 0)
+
+    return {
+        "daily": _sum_for("date(d.created_at) = date('now')", scope_params),
+        "weekly": _sum_for("date(d.created_at) >= date('now', '-6 day')", scope_params),
+        "monthly": _sum_for(
+            "strftime('%Y-%m', d.created_at) = strftime('%Y-%m', 'now')",
+            scope_params,
+        ),
+    }
+
+
+def format_sales_amount(value: float) -> str:
+    return format_money(value) or f"{_coerce_float(value, 0.0):,.2f}"
+
+
 def upcoming_warranty_projection(conn, months_ahead: int = 6) -> pd.DataFrame:
     """Return a month-by-month projection of expiring active warranties."""
 
@@ -5463,7 +5510,13 @@ def fetch_warranty_window(conn, start_days: int, end_days: int) -> pd.DataFrame:
     where_clause = " AND ".join(filters)
     query = dedent(
         f"""
-        SELECT c.name AS customer, p.name AS product, p.model, w.serial, w.issue_date, w.expiry_date, w.remarks,
+        SELECT c.name AS customer,
+               p.name AS product,
+               p.model,
+               w.serial,
+               COALESCE(w.issue_date, c.purchase_date) AS issue_date,
+               w.expiry_date,
+               w.remarks,
                COALESCE(c.sales_person, u.username) AS staff
         FROM warranties w
         LEFT JOIN customers c ON c.customer_id = w.customer_id
@@ -6198,6 +6251,8 @@ def dashboard(conn):
     current_actor_id = current_user_id()
     allowed_customers = accessible_customer_ids(conn)
     scope_clause, scope_params = customer_scope_filter("c")
+    sales_scope_clause, sales_scope_params = sales_scope_filter("d")
+    sales_metrics = fetch_sales_metrics(conn, sales_scope_clause, sales_scope_params)
 
     announcement = df_query(
         conn,
@@ -6299,6 +6354,12 @@ def dashboard(conn):
                 ).iloc[0]["c"]
             )
             st.metric("Expired", expired_count)
+
+        st.markdown("#### Sales performance")
+        sales_cols = st.columns(3)
+        sales_cols[0].metric("Daily sales", format_sales_amount(sales_metrics["daily"]))
+        sales_cols[1].metric("Weekly sales", format_sales_amount(sales_metrics["weekly"]))
+        sales_cols[2].metric("Monthly sales", format_sales_amount(sales_metrics["monthly"]))
 
         st.markdown("#### Daily report coverage")
         report_date_value = st.date_input(
@@ -6591,7 +6652,69 @@ def dashboard(conn):
                     else:
                         st.caption("No attachment uploaded for this report.")
     else:
-        st.info("Staff view: focus on upcoming activities below. Metrics are available to admins only.")
+        st.info("Staff view: focus on upcoming activities below.")
+        st.markdown("#### Your sales snapshot")
+        staff_sales_cols = st.columns(3)
+        staff_sales_cols[0].metric("Today", format_sales_amount(sales_metrics["daily"]))
+        staff_sales_cols[1].metric("Last 7 days", format_sales_amount(sales_metrics["weekly"]))
+        staff_sales_cols[2].metric("This month", format_sales_amount(sales_metrics["monthly"]))
+
+        staff_sales_df = df_query(
+            conn,
+            """
+            SELECT d.do_number,
+                   d.customer_id,
+                   d.created_by,
+                   d.record_type,
+                   d.items_payload,
+                   d.description,
+                   d.total_amount,
+                   d.status,
+                   d.created_at,
+                   COALESCE(c.company_name, c.name, '(customer)') AS customer
+            FROM delivery_orders d
+            LEFT JOIN customers c ON c.customer_id = d.customer_id
+            WHERE d.deleted_at IS NULL
+              AND COALESCE(d.record_type, 'delivery_order') IN ('delivery_order', 'work_done')
+            ORDER BY datetime(d.created_at) DESC, d.do_number DESC
+            LIMIT 30
+            """,
+        )
+        staff_sales_df = filter_delivery_orders_for_view(
+            staff_sales_df,
+            allowed_customers,
+            record_types={"delivery_order", "work_done"},
+        )
+        if staff_sales_df.empty:
+            st.caption("No personal delivery order sales have been logged yet.")
+        else:
+            staff_sales_df["Products"] = staff_sales_df.apply(
+                lambda row: dedupe_join(
+                    format_simple_item_labels(parse_delivery_items_payload(row.get("items_payload")))
+                )
+                or clean_text(row.get("description"))
+                or "—",
+                axis=1,
+            )
+            staff_sales_df["When"] = staff_sales_df["created_at"].apply(
+                lambda value: format_time_ago(value) or format_period_range(value, value)
+            )
+            staff_sales_df["Total (BDT)"] = staff_sales_df["total_amount"].apply(format_sales_amount)
+            staff_sales_df["Status"] = staff_sales_df["status"].apply(
+                lambda value: clean_text(value).title() if value else "Pending"
+            )
+            st.dataframe(
+                staff_sales_df[
+                    ["do_number", "customer", "Products", "Total (BDT)", "Status", "When"]
+                ].rename(
+                    columns={
+                        "do_number": "DO/Work No.",
+                        "customer": "Customer",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     report_scope = ""
     report_params: tuple[object, ...] = ()
@@ -7098,27 +7221,47 @@ def dashboard(conn):
             hide_index=True,
         )
 
+    staff_scope_clause = ""
+    staff_scope_params: tuple[object, ...] = ()
+    if not is_admin:
+        user_id = current_user_id()
+        if user_id is None:
+            staff_scope_clause = "1=0"
+        else:
+            staff_scope_clause = "customer_id IN (SELECT customer_id FROM customers WHERE created_by=?)"
+            staff_scope_params = (user_id,)
+
+    warranty_where = "status='active' AND date(expiry_date) < date('now')"
+    if staff_scope_clause:
+        warranty_where = f"{warranty_where} AND {staff_scope_clause}"
     month_expired_current, month_expired_previous = month_bucket_counts(
         conn,
         "warranties",
         "expiry_date",
-        where="status='active' AND date(expiry_date) < date('now')",
+        where=warranty_where,
+        params=staff_scope_params,
     )
     month_expired = month_expired_current
     expired_delta = format_metric_delta(month_expired_current, month_expired_previous)
 
+    service_where = staff_scope_clause if staff_scope_clause else None
     service_month_current, service_month_previous = month_bucket_counts(
         conn,
         "services",
         "service_date",
+        where=service_where,
+        params=staff_scope_params if staff_scope_clause else None,
     )
     service_month = service_month_current
     service_delta = format_metric_delta(service_month_current, service_month_previous)
 
+    maintenance_where = staff_scope_clause if staff_scope_clause else None
     maintenance_month_current, maintenance_month_previous = month_bucket_counts(
         conn,
         "maintenance_records",
         "maintenance_date",
+        where=maintenance_where,
+        params=staff_scope_params if staff_scope_clause else None,
     )
     maintenance_month = maintenance_month_current
     maintenance_delta = format_metric_delta(
@@ -7126,16 +7269,25 @@ def dashboard(conn):
     )
     today_expired_df = df_query(
         conn,
-        """
-        SELECT c.name AS customer, p.name AS product, p.model, w.serial, w.issue_date, w.expiry_date,
-               COALESCE(c.sales_person, u.username) AS staff
-        FROM warranties w
-        LEFT JOIN customers c ON c.customer_id = w.customer_id
-        LEFT JOIN products p ON p.product_id = w.product_id
-        LEFT JOIN users u ON u.user_id = c.created_by
-        WHERE w.status='active' AND date(w.expiry_date) = date('now')
-        ORDER BY date(w.expiry_date) ASC
-        """,
+        dedent(
+            f"""
+            SELECT c.name AS customer,
+                   p.name AS product,
+                   p.model,
+                   w.serial,
+                   COALESCE(w.issue_date, c.purchase_date) AS issue_date,
+                   w.expiry_date,
+                   COALESCE(c.sales_person, u.username) AS staff
+            FROM warranties w
+            LEFT JOIN customers c ON c.customer_id = w.customer_id
+            LEFT JOIN products p ON p.product_id = w.product_id
+            LEFT JOIN users u ON u.user_id = c.created_by
+            WHERE w.status='active' AND date(w.expiry_date) = date('now')
+            {f"AND {scope_clause}" if scope_clause else ""}
+            ORDER BY date(w.expiry_date) ASC
+            """
+        ),
+        scope_params,
     )
     today_expired_count = len(today_expired_df.index)
     col5, col6, col7, col8 = st.columns(4)
@@ -9696,9 +9848,10 @@ def customers_page(conn):
                 help="Where goods should be delivered. Leave blank if same as billing.",
             )
             purchase_date = st.date_input(
-                "Purchase/Issue date",
+                "Purchase date",
                 value=datetime.now().date(),
                 key="new_customer_purchase_date",
+                help="Used as the warranty issue date when creating new warranty records.",
             )
             remarks = st.text_area(
                 "Remarks",
