@@ -214,6 +214,15 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
         ),
         ("notes", {"label": "Notes", "type": "text"}),
         ("person_in_charge", {"label": "Person In Charge", "type": "text"}),
+        (
+            "reminder_date",
+            {
+                "label": "Reminder date",
+                "type": "date",
+                "format": "DD-MM-YYYY",
+                "help": "Optional reminder date for this follow-up.",
+            },
+        ),
     ]
 )
 
@@ -222,6 +231,7 @@ REPORT_GRID_FIELDS = SERVICE_REPORT_FIELDS
 REPORT_TEMPLATE_LABELS = OrderedDict(
     [
         ("service", "Service report"),
+        ("sales", "Sales report"),
         ("follow_up", "Follow-up report"),
     ]
 )
@@ -229,12 +239,18 @@ REPORT_TEMPLATE_LABELS = OrderedDict(
 REPORT_TEMPLATE_FIELDS = OrderedDict(
     [
         ("service", SERVICE_REPORT_FIELDS),
+        ("sales", SERVICE_REPORT_FIELDS),
         ("follow_up", FOLLOW_UP_REPORT_FIELDS),
     ]
 )
 
 REPORT_TEMPLATE_SUMMARY_FIELDS = {
     "service": {
+        "tasks": "reported_complaints",
+        "remarks": "details_remarks",
+        "research": "product_details",
+    },
+    "sales": {
         "tasks": "reported_complaints",
         "remarks": "details_remarks",
         "research": "product_details",
@@ -1577,9 +1593,12 @@ def upcoming_warranty_projection(conn, months_ahead: int = 6) -> pd.DataFrame:
                    COUNT(*) AS total
             FROM warranties w
             LEFT JOIN customers c ON c.customer_id = w.customer_id
+            LEFT JOIN products p ON p.product_id = w.product_id
             WHERE w.status='active'
               AND w.expiry_date IS NOT NULL
               AND date(w.expiry_date) BETWEEN date(?) AND date(?)
+              AND p.name IS NOT NULL
+              AND TRIM(p.name) != ''
               {scope_filter}
             GROUP BY month_bucket
             ORDER BY month_bucket
@@ -1652,6 +1671,8 @@ def upcoming_warranty_breakdown(
             WHERE w.status='active'
               AND w.expiry_date IS NOT NULL
               AND date(w.expiry_date) BETWEEN date(?) AND date(?)
+              AND p.name IS NOT NULL
+              AND TRIM(p.name) != ''
               {scope_filter}
             GROUP BY bucket
             ORDER BY total DESC, bucket ASC
@@ -2167,6 +2188,55 @@ def _build_staff_alerts(conn, *, user_id: Optional[int]) -> list[dict[str, objec
                     "severity": severity,
                 }
             )
+
+    follow_up_reports = df_query(
+        conn,
+        dedent(
+            """
+            SELECT report_id, grid_payload
+            FROM work_reports
+            WHERE user_id=?
+              AND LOWER(COALESCE(report_template, '')) = 'follow_up'
+              AND grid_payload IS NOT NULL
+              AND grid_payload != ''
+            ORDER BY datetime(updated_at) DESC
+            LIMIT 50
+            """
+        ),
+        (user_id,),
+    )
+    follow_up_reminders: list[tuple[date, dict[str, object]]] = []
+    if not follow_up_reports.empty:
+        for _, row in follow_up_reports.iterrows():
+            grid_rows = parse_report_grid_payload(
+                row.get("grid_payload"), template_key="follow_up"
+            )
+            for entry in grid_rows:
+                reminder_iso = to_iso_date(entry.get("reminder_date"))
+                if not reminder_iso:
+                    continue
+                reminder_dt = pd.to_datetime(reminder_iso, errors="coerce")
+                if pd.isna(reminder_dt):
+                    continue
+                reminder_date = reminder_dt.date()
+                customer_label = clean_text(entry.get("client_name")) or "Follow-up"
+                message = clean_text(entry.get("notes")) or "Follow-up reminder"
+                follow_up_reminders.append(
+                    (
+                        reminder_date,
+                        {
+                            "title": customer_label,
+                            "message": f"{message} (due {format_period_range(reminder_iso, reminder_iso)})",
+                            "severity": "warning"
+                            if reminder_date <= date.today()
+                            else "info",
+                        },
+                    )
+                )
+    if follow_up_reminders:
+        follow_up_reminders.sort(key=lambda item: item[0])
+        for _, reminder in follow_up_reminders[:12]:
+            alerts.append(reminder)
 
     pending_report = df_query(
         conn,
@@ -5502,6 +5572,8 @@ def fetch_warranty_window(conn, start_days: int, end_days: int) -> pd.DataFrame:
     filters = [
         "w.status='active'",
         "date(w.expiry_date) BETWEEN date('now', ?) AND date('now', ?)",
+        "p.name IS NOT NULL",
+        "TRIM(p.name) != ''",
     ]
     params: list[object] = []
     if scope_clause:
@@ -6543,6 +6615,11 @@ def dashboard(conn):
                             "remarks": "Remarks / blockers",
                             "research": "Research / learnings",
                         },
+                        "sales": {
+                            "tasks": "Tasks completed",
+                            "remarks": "Remarks / blockers",
+                            "research": "Research / learnings",
+                        },
                         "follow_up": {
                             "tasks": "Notes",
                             "remarks": "Status",
@@ -6856,7 +6933,7 @@ def dashboard(conn):
                        COALESCE(u.username, 'User #' || wr.user_id) AS owner
                 FROM work_reports wr
                 LEFT JOIN users u ON u.user_id = wr.user_id
-                WHERE LOWER(COALESCE(wr.report_template, '')) IN ('service', 'follow_up')
+                WHERE LOWER(COALESCE(wr.report_template, '')) IN ('service', 'sales', 'follow_up')
                 ORDER BY datetime(wr.created_at) DESC, wr.report_id DESC
                 LIMIT 6
                 """
@@ -8116,6 +8193,7 @@ def render_customer_quick_edit_section(
     show_duplicate: bool = True,
     action_icon_only: bool = False,
     use_popover: bool = True,
+    include_quotation_upload: bool = True,
 ) -> pd.DataFrame:
     pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
@@ -8465,11 +8543,12 @@ def render_customer_quick_edit_section(
     doc_type_options = [
         "Delivery order",
         "Work done",
-        "Quotation",
         "Service",
         "Maintenance",
         "Other",
     ]
+    if include_quotation_upload:
+        doc_type_options.insert(2, "Quotation")
     base_widths = [
         1.2,
         1.2,
@@ -9113,21 +9192,28 @@ def _render_doc_detail_inputs(
         )
         details["advance_receipt_upload"] = None
         details["receipt_upload"] = None
-        details["advance_taken"] = st.checkbox(
-            "Advance payment was received",
-            key=f"{key_prefix}_do_advance_taken",
-            help="Enable if an advance receipt should be attached.",
-        )
-        details["advance_receipt_upload"] = st.file_uploader(
-            "Advance receipt (required for advanced / if advance taken)",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            key=f"{key_prefix}_do_advance_receipt",
-        )
-        details["receipt_upload"] = st.file_uploader(
-            "Full payment receipt (required for paid)",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            key=f"{key_prefix}_do_receipt",
-        )
+        status_value = normalize_delivery_status(details.get("status"))
+        details["advance_taken"] = False
+        if status_value == "advanced":
+            details["advance_taken"] = st.checkbox(
+                "Advance payment was received",
+                key=f"{key_prefix}_do_advance_taken",
+                help="Enable if an advance receipt should be attached.",
+            )
+            if details.get("advance_taken"):
+                details["advance_receipt_upload"] = st.file_uploader(
+                    "Advance receipt (highly recommended)",
+                    type=["pdf", "png", "jpg", "jpeg", "webp"],
+                    key=f"{key_prefix}_do_advance_receipt",
+                    help="Add the advance receipt when a deposit was collected.",
+                )
+        if status_value == "paid":
+            details["receipt_upload"] = st.file_uploader(
+                "Full payment receipt (highly recommended)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_do_receipt",
+                help="Attach the final receipt for paid delivery orders/work done.",
+            )
     elif doc_type == "Service":
         items_key = f"{key_prefix}_service_items"
         st.session_state.setdefault(items_key, _default_simple_items())
@@ -9187,11 +9273,12 @@ def _render_doc_detail_inputs(
             value=user_label,
             key=f"{key_prefix}_service_person_in_charge",
         )
-        details["receipt_upload"] = st.file_uploader(
-            "Payment receipt (required for advance/paid)",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            key=f"{key_prefix}_service_receipt",
-        )
+        if details.get("payment_status") in {"advanced", "paid"}:
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (highly recommended)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_service_receipt",
+            )
     elif doc_type == "Maintenance":
         items_key = f"{key_prefix}_maintenance_items"
         st.session_state.setdefault(items_key, _default_simple_items())
@@ -9251,11 +9338,12 @@ def _render_doc_detail_inputs(
             value=user_label,
             key=f"{key_prefix}_maintenance_person_in_charge",
         )
-        details["receipt_upload"] = st.file_uploader(
-            "Payment receipt (required for advance/paid)",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            key=f"{key_prefix}_maintenance_receipt",
-        )
+        if details.get("payment_status") in {"advanced", "paid"}:
+            details["receipt_upload"] = st.file_uploader(
+                "Payment receipt (highly recommended)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_maintenance_receipt",
+            )
     return details
 
 
@@ -9277,15 +9365,12 @@ def _save_customer_document_upload(
             return False
         status_value = normalize_delivery_status(details.get("status"))
         if status_value == "advanced" and details.get("advance_receipt_upload") is None:
-            st.error("Upload a receipt before marking this as advanced.")
-            return False
+            st.warning("Advance receipt is highly recommended for advanced records.")
         if status_value == "paid":
             if details.get("receipt_upload") is None:
-                st.error("Upload the full payment receipt before marking this as paid.")
-                return False
+                st.warning("Full payment receipt is highly recommended for paid records.")
             if details.get("advance_taken") and details.get("advance_receipt_upload") is None:
-                st.error("Upload the advance receipt before saving this paid record.")
-                return False
+                st.warning("Advance receipt is highly recommended when an advance was taken.")
     if doc_type == "Quotation":
         status_value = clean_text(details.get("payment_status")) or "pending"
         if not clean_text(details.get("reference")):
@@ -9314,8 +9399,7 @@ def _save_customer_document_upload(
             st.error("Add at least one service product item before saving.")
             return False
         if details.get("payment_status") in {"advanced", "paid"} and details.get("receipt_upload") is None:
-            st.error("Upload a receipt before marking this as advanced or paid.")
-            return False
+            st.warning("Payment receipt is highly recommended for advanced or paid service records.")
         details["items"] = items_clean
     if doc_type == "Maintenance":
         if not clean_text(details.get("description")):
@@ -9327,8 +9411,7 @@ def _save_customer_document_upload(
             st.error("Add at least one maintenance product item before saving.")
             return False
         if details.get("payment_status") in {"advanced", "paid"} and details.get("receipt_upload") is None:
-            st.error("Upload a receipt before marking this as advanced or paid.")
-            return False
+            st.warning("Payment receipt is highly recommended for advanced or paid maintenance records.")
         details["items"] = items_clean
 
     doc_dir_map = {
@@ -11083,10 +11166,11 @@ def warranties_page(conn):
 
     search_filter = "(? = '' OR c.name LIKE '%'||?||'%' OR p.name LIKE '%'||?||'%' OR p.model LIKE '%'||?||'%' OR w.serial LIKE '%'||?||'%')"
     status_filter = "(w.status IS NULL OR w.status <> 'deleted')"
+    product_filter = "(p.name IS NOT NULL AND TRIM(p.name) != '')"
     scope_clause, scope_params = customer_scope_filter("c")
 
     def build_filters(date_condition: str) -> tuple[str, tuple[object, ...]]:
-        clauses = [search_filter, status_filter, date_condition]
+        clauses = [search_filter, status_filter, product_filter, date_condition]
         params = [q, q, q, q, q]
         if scope_clause:
             clauses.append(scope_clause)
@@ -14916,9 +15000,9 @@ def delivery_orders_page(
                 else f"{record_label} full payment receipt (PDF or image)"
             )
             receipt_help = (
-                "Upload proof of advance payment."
+                "Highly recommended: attach proof of advance payment."
                 if status_value == "advanced"
-                else "Upload proof of payment before locking the record."
+                else "Highly recommended: attach proof of payment for paid records."
             )
             receipt_upload = st.file_uploader(
                 receipt_label,
@@ -15049,8 +15133,9 @@ def delivery_orders_page(
                     )
                 if not receipt_path:
                     missing_label = "advance" if status_value == "advanced" else "full payment"
-                    st.error(f"Upload an {missing_label} receipt before saving this record.")
-                    return
+                    st.warning(
+                        f"No {missing_label} receipt uploaded. It is highly recommended to attach one."
+                    )
             if auto_mark_paid and existing_receipt and selected_customer:
                 advance_receipt_path = clean_text(existing_receipt)
                 resolved_advance = resolve_upload_path(advance_receipt_path)
@@ -15505,6 +15590,7 @@ def operations_page(conn):
             show_duplicate=False,
             action_icon_only=True,
             use_popover=True,
+            include_quotation_upload=False,
         )
     st.markdown("---")
     record_options = {
@@ -15644,6 +15730,8 @@ def customer_summary_page(conn):
         LEFT JOIN customers c ON c.customer_id = w.customer_id
         LEFT JOIN products p ON p.product_id = w.product_id
         WHERE w.customer_id IN ({placeholders})
+          AND p.name IS NOT NULL
+          AND TRIM(p.name) != ''
         ORDER BY date(w.expiry_date) DESC
         """,
         ids,
@@ -17755,62 +17843,64 @@ def _import_clean6(conn, df, tag="Import"):
             if normalized_phone:
                 phones_to_recalc.add(normalized_phone)
 
-        name, model = split_product_label(product_label)
-
-        def exists_prod(name, model):
-            if not name:
-                return False
-            cur.execute(
-                "SELECT 1 FROM products WHERE name = ? AND IFNULL(model,'') = IFNULL(?, '') LIMIT 1",
-                (name, model),
-            )
-            return cur.fetchone() is not None
-
-        dupp = 1 if exists_prod(name, model) else 0
-        cur.execute(
-            "INSERT INTO products (name, model, dup_flag) VALUES (?, ?, ?)",
-            (name, model, dupp),
-        )
-        pid = cur.lastrowid
-        if dupp:
-            d_p += 1
-
-        # we still record orders (hidden) to keep a timeline if needed
         base_dt = purchase_dt or pd.Timestamp.now().normalize()
-        order_date = base_dt
-        delivery_date = base_dt
-        cur.execute(
-            "INSERT INTO orders (customer_id, order_date, delivery_date, notes) VALUES (?, ?, ?, ?)",
-            (
-                cid,
-                order_date.strftime("%Y-%m-%d") if order_date is not None else None,
-                delivery_date.strftime("%Y-%m-%d") if delivery_date is not None else None,
-                f"Imported ({tag})",
-            ),
-        )
-        oid = cur.lastrowid
-        cur.execute(
-            "INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)",
-            (oid, pid, quantity_value),
-        )
-        order_item_id = cur.lastrowid
+        pid = None
+        oid = None
+        order_item_id = None
+        warranty_id = None
+        name, model = split_product_label(product_label)
+        if name:
+            def exists_prod(name, model):
+                cur.execute(
+                    "SELECT 1 FROM products WHERE name = ? AND IFNULL(model,'') = IFNULL(?, '') LIMIT 1",
+                    (name, model),
+                )
+                return cur.fetchone() is not None
 
-        base = base_dt
-        expiry = base + pd.Timedelta(days=365)
-        cur.execute(
-            "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status, remarks, dup_flag) VALUES (?, ?, ?, ?, ?, 'active', ?, 0)",
-            (
-                cid,
-                pid,
-                None,
-                base.strftime("%Y-%m-%d"),
-                expiry.strftime("%Y-%m-%d"),
-                remarks_val,
-            ),
-        )
-        warranty_id = cur.lastrowid
+            dupp = 1 if exists_prod(name, model) else 0
+            cur.execute(
+                "INSERT INTO products (name, model, dup_flag) VALUES (?, ?, ?)",
+                (name, model, dupp),
+            )
+            pid = cur.lastrowid
+            if dupp:
+                d_p += 1
 
-        if do_serial:
+            # we still record orders (hidden) to keep a timeline if needed
+            order_date = base_dt
+            delivery_date = base_dt
+            cur.execute(
+                "INSERT INTO orders (customer_id, order_date, delivery_date, notes) VALUES (?, ?, ?, ?)",
+                (
+                    cid,
+                    order_date.strftime("%Y-%m-%d") if order_date is not None else None,
+                    delivery_date.strftime("%Y-%m-%d") if delivery_date is not None else None,
+                    f"Imported ({tag})",
+                ),
+            )
+            oid = cur.lastrowid
+            cur.execute(
+                "INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)",
+                (oid, pid, quantity_value),
+            )
+            order_item_id = cur.lastrowid
+
+            base = base_dt
+            expiry = base + pd.Timedelta(days=365)
+            cur.execute(
+                "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status, remarks, dup_flag) VALUES (?, ?, ?, ?, ?, 'active', ?, 0)",
+                (
+                    cid,
+                    pid,
+                    None,
+                    base.strftime("%Y-%m-%d"),
+                    expiry.strftime("%Y-%m-%d"),
+                    remarks_val,
+                ),
+            )
+            warranty_id = cur.lastrowid
+
+        if do_serial and oid is not None:
             description = product_label
             cur.execute(
                 "INSERT OR IGNORE INTO delivery_orders (do_number, customer_id, order_id, description, sales_person, remarks, file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -17824,7 +17914,9 @@ def _import_clean6(conn, df, tag="Import"):
                     None,
                 ),
             )
-        purchase_date = purchase_str or (base.strftime("%Y-%m-%d") if isinstance(base, pd.Timestamp) else None)
+        purchase_date = purchase_str or (
+            base_dt.strftime("%Y-%m-%d") if isinstance(base_dt, pd.Timestamp) else None
+        )
         cur.execute(
             "UPDATE customers SET purchase_date=?, product_info=?, delivery_order_code=?, remarks=?, amount_spent=?, delivery_address=? WHERE customer_id=?",
             (
@@ -18740,6 +18832,9 @@ def reports_page(conn):
         month_start: date,
         month_end: date,
     ) -> bool:
+        template_key = _normalize_report_template(row.get("report_template"))
+        if template_key in {"service", "sales", "follow_up"}:
+            return True
         period_key = clean_text(row.get("period_type")) or ""
         period_key = period_key.lower()
         row_start = _date_or(row.get("period_start"), today)
@@ -19313,25 +19408,29 @@ def reports_page(conn):
 
             if not is_admin:
                 validation_error: Optional[str] = None
-                if normalized_key == "daily":
-                    if normalized_start != today or normalized_end != today:
-                        validation_error = "Daily reports can only be submitted for today."
-                elif normalized_key == "weekly":
-                    if today.weekday() != 5:
-                        validation_error = "Weekly reports can only be submitted on Saturdays."
-                    elif not (
-                        normalized_start == current_week_start
-                        and normalized_end == current_week_end
-                    ):
-                        validation_error = (
-                            "Weekly reports must cover the current week (Monday to Sunday)."
-                        )
-                elif normalized_key == "monthly":
-                    if not (
-                        normalized_start == current_month_start
-                        and normalized_end == current_month_end
-                    ):
-                        validation_error = "Monthly reports must cover the current month."
+                allow_relaxed_edit = bool(
+                    editing_record and template_key in {"service", "sales", "follow_up"}
+                )
+                if not allow_relaxed_edit:
+                    if normalized_key == "daily":
+                        if normalized_start != today or normalized_end != today:
+                            validation_error = "Daily reports can only be submitted for today."
+                    elif normalized_key == "weekly":
+                        if today.weekday() != 5:
+                            validation_error = "Weekly reports can only be submitted on Saturdays."
+                        elif not (
+                            normalized_start == current_week_start
+                            and normalized_end == current_week_end
+                        ):
+                            validation_error = (
+                                "Weekly reports must cover the current week (Monday to Sunday)."
+                            )
+                    elif normalized_key == "monthly":
+                        if not (
+                            normalized_start == current_month_start
+                            and normalized_end == current_month_end
+                        ):
+                            validation_error = "Monthly reports must cover the current month."
                 if validation_error:
                     st.error(validation_error)
                     save_allowed = False
