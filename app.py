@@ -6769,34 +6769,6 @@ def dashboard(conn):
             icon="📢",
         )
 
-    st.markdown("##### Message admin")
-    if not is_admin:
-        st.caption("Staff messaging is disabled.")
-    else:
-        messages_df = df_query(
-            conn,
-            dedent(
-                """
-                SELECT sam.message_id, sam.message, sam.created_at, u.username
-                FROM staff_admin_messages sam
-                LEFT JOIN users u ON u.user_id = sam.user_id
-                ORDER BY datetime(sam.created_at) DESC
-                LIMIT 10
-                """
-            ),
-        )
-        if messages_df.empty:
-            st.caption("No staff messages yet.")
-        else:
-            for _, row in messages_df.iterrows():
-                author = clean_text(row.get("username")) or "Staff"
-                created_at = pd.to_datetime(row.get("created_at"), errors="coerce")
-                created_label = (
-                    created_at.strftime("%d-%m-%Y %H:%M") if pd.notna(created_at) else ""
-                )
-                label_suffix = f" ({created_label})" if created_label else ""
-                st.info(f"**{author}**{label_suffix}\n\n{clean_text(row.get('message'))}")
-
     if is_admin:
         if st.session_state.pop("dashboard_remark_reset", False):
             st.session_state["dashboard_remark_text"] = ""
@@ -8163,6 +8135,66 @@ def dashboard(conn):
                 )
                 st.dataframe(formatted_ops, use_container_width=True)
 
+    def _resolve_recent_pdf_bytes(path_value: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
+        clean_path = clean_text(path_value)
+        if not clean_path:
+            return None, None
+        resolved_path = resolve_upload_path(clean_path)
+        if not resolved_path:
+            return None, None
+        pdf_path = resolved_path
+        if pdf_path.suffix.lower() != ".pdf":
+            alt_pdf = pdf_path.with_suffix(".pdf")
+            if alt_pdf.exists():
+                pdf_path = alt_pdf
+            else:
+                return None, None
+        if not pdf_path.exists():
+            return None, None
+        try:
+            return pdf_path.read_bytes(), pdf_path.name
+        except OSError:
+            return None, None
+
+    def _render_recent_pdf_downloads(
+        label_prefix: str,
+        snapshot_df: pd.DataFrame,
+        key_prefix: str,
+    ) -> None:
+        if snapshot_df.empty:
+            return
+        download_rows = []
+        for _, row in snapshot_df.iterrows():
+            attachments = []
+            for label, path_value in (
+                ("Document", row.get("file_path")),
+                ("Receipt", row.get("payment_receipt_path")),
+            ):
+                payload, filename = _resolve_recent_pdf_bytes(path_value)
+                if payload and filename:
+                    attachments.append((label, payload, filename))
+            if attachments:
+                download_rows.append((row, attachments))
+        if not download_rows:
+            return
+        st.markdown("##### Download PDFs")
+        for idx, (row, attachments) in enumerate(download_rows):
+            reference = clean_text(row.get("do_number")) or "Record"
+            customer_label = clean_text(row.get("customer")) or "Customer"
+            expander_title = f"{label_prefix} {reference} • {customer_label}"
+            with st.expander(expander_title, expanded=False):
+                for label, payload, filename in attachments:
+                    safe_key = (
+                        _sanitize_path_component(f"{reference}_{label}_{idx}") or "file"
+                    )
+                    st.download_button(
+                        f"Download {label} PDF",
+                        payload,
+                        file_name=filename,
+                        key=f"{key_prefix}_{safe_key}",
+                        mime="application/pdf",
+                    )
+
     st.markdown("---")
     st.subheader("🔎 Quick snapshots")
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -8349,6 +8381,8 @@ def dashboard(conn):
                    d.created_at,
                    d.status,
                    d.total_amount,
+                   d.file_path,
+                   d.payment_receipt_path,
                    COALESCE(c.name, '(unknown)') AS customer,
                    d.description
             FROM delivery_orders d
@@ -8385,8 +8419,16 @@ def dashboard(conn):
                         "customer": "Customer",
                         "description": "Description",
                     }
-                ).drop(columns=["customer_id"], errors="ignore"),
+                ).drop(
+                    columns=["customer_id", "file_path", "payment_receipt_path"],
+                    errors="ignore",
+                ),
                 use_container_width=True,
+            )
+            _render_recent_pdf_downloads(
+                "Delivery order",
+                recent_delivery_orders,
+                "recent_delivery_pdf",
             )
 
     with tab5:
@@ -8398,6 +8440,8 @@ def dashboard(conn):
                    d.created_at,
                    d.status,
                    d.total_amount,
+                   d.file_path,
+                   d.payment_receipt_path,
                    COALESCE(c.name, '(unknown)') AS customer,
                    d.description
             FROM delivery_orders d
@@ -8432,8 +8476,16 @@ def dashboard(conn):
                         "customer": "Customer",
                         "description": "Description",
                     }
-                ).drop(columns=["customer_id"], errors="ignore"),
+                ).drop(
+                    columns=["customer_id", "file_path", "payment_receipt_path"],
+                    errors="ignore",
+                ),
                 use_container_width=True,
+            )
+            _render_recent_pdf_downloads(
+                "Work order",
+                recent_work_orders,
+                "recent_work_pdf",
             )
 
     if is_admin:
