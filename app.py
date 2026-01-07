@@ -8165,10 +8165,12 @@ def dashboard(conn):
 
     st.markdown("---")
     st.subheader("🔎 Quick snapshots")
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Upcoming expiries (next 60 days)",
         "Recent services",
         "Recent maintenance",
+        "Recent delivery orders",
+        "Recent work orders",
     ])
 
     with tab1:
@@ -8337,6 +8339,102 @@ def dashboard(conn):
             ).drop(columns=["customer_id", "do_customer_id"], errors="ignore"),
             use_container_width=True,
         )
+
+    with tab4:
+        recent_delivery_orders = df_query(
+            conn,
+            """
+            SELECT d.do_number,
+                   d.customer_id,
+                   d.created_at,
+                   d.status,
+                   d.total_amount,
+                   COALESCE(c.name, '(unknown)') AS customer,
+                   d.description
+            FROM delivery_orders d
+            LEFT JOIN customers c ON c.customer_id = d.customer_id
+            WHERE d.deleted_at IS NULL
+              AND COALESCE(d.record_type, 'delivery_order') = 'delivery_order'
+            ORDER BY datetime(d.created_at) DESC
+            LIMIT 10
+            """,
+        )
+        if allowed_customers is not None:
+            recent_delivery_orders = recent_delivery_orders[
+                recent_delivery_orders["customer_id"].apply(
+                    lambda value: pd.notna(value) and int(value) in allowed_customers
+                )
+            ]
+        if recent_delivery_orders.empty:
+            st.info("No recent delivery orders found.")
+        else:
+            recent_delivery_orders = fmt_dates(recent_delivery_orders, ["created_at"])
+            recent_delivery_orders["total_amount"] = recent_delivery_orders[
+                "total_amount"
+            ].apply(
+                lambda value: format_money(value)
+                or (f"{_coerce_float(value, 0.0):,.2f}" if pd.notna(value) else "—")
+            )
+            st.dataframe(
+                recent_delivery_orders.rename(
+                    columns={
+                        "do_number": "DO Serial",
+                        "created_at": "Created",
+                        "status": "Status",
+                        "total_amount": "Total",
+                        "customer": "Customer",
+                        "description": "Description",
+                    }
+                ).drop(columns=["customer_id"], errors="ignore"),
+                use_container_width=True,
+            )
+
+    with tab5:
+        recent_work_orders = df_query(
+            conn,
+            """
+            SELECT d.do_number,
+                   d.customer_id,
+                   d.created_at,
+                   d.status,
+                   d.total_amount,
+                   COALESCE(c.name, '(unknown)') AS customer,
+                   d.description
+            FROM delivery_orders d
+            LEFT JOIN customers c ON c.customer_id = d.customer_id
+            WHERE d.deleted_at IS NULL
+              AND COALESCE(d.record_type, 'delivery_order') = 'work_done'
+            ORDER BY datetime(d.created_at) DESC
+            LIMIT 10
+            """,
+        )
+        if allowed_customers is not None:
+            recent_work_orders = recent_work_orders[
+                recent_work_orders["customer_id"].apply(
+                    lambda value: pd.notna(value) and int(value) in allowed_customers
+                )
+            ]
+        if recent_work_orders.empty:
+            st.info("No recent work orders found.")
+        else:
+            recent_work_orders = fmt_dates(recent_work_orders, ["created_at"])
+            recent_work_orders["total_amount"] = recent_work_orders["total_amount"].apply(
+                lambda value: format_money(value)
+                or (f"{_coerce_float(value, 0.0):,.2f}" if pd.notna(value) else "—")
+            )
+            st.dataframe(
+                recent_work_orders.rename(
+                    columns={
+                        "do_number": "Work order",
+                        "created_at": "Created",
+                        "status": "Status",
+                        "total_amount": "Total",
+                        "customer": "Customer",
+                        "description": "Description",
+                    }
+                ).drop(columns=["customer_id"], errors="ignore"),
+                use_container_width=True,
+            )
 
     if is_admin:
         st.markdown("---")
@@ -16020,6 +16118,10 @@ def delivery_orders_page(
         elif selected_customer_state is None:
             st.session_state[autofill_customer_key] = None
 
+    receipt_download = None
+    receipt_download_name = None
+    receipt_download_key = None
+
     with st.form("delivery_order_form", clear_on_submit=True):
         do_number = st.text_input(
             f"{record_label} number *",
@@ -16077,11 +16179,10 @@ def delivery_orders_page(
             if current_receipt_path:
                 receipt_file = resolve_upload_path(current_receipt_path)
                 if receipt_file and receipt_file.exists():
-                    st.download_button(
-                        "View current receipt",
-                        data=receipt_file.read_bytes(),
-                        file_name=receipt_file.name,
-                        key=f"{record_label.lower().replace(' ', '_')}_receipt_view",
+                    receipt_download = receipt_file.read_bytes()
+                    receipt_download_name = receipt_file.name
+                    receipt_download_key = (
+                        f"{record_label.lower().replace(' ', '_')}_receipt_view"
                     )
                 st.caption("Uploading a new file will replace the current receipt.")
         st.markdown("**Products / items**")
@@ -16132,6 +16233,14 @@ def delivery_orders_page(
             label=f"{record_label} document OCR",
         )
         submit = st.form_submit_button(f"Save {record_label_lower}", type="primary")
+
+    if receipt_download and receipt_download_name:
+        st.download_button(
+            "View current receipt",
+            data=receipt_download,
+            file_name=receipt_download_name,
+            key=receipt_download_key,
+        )
 
     if _guard_double_submit(f"{record_type_key}_save_form", submit):
         sales_person = clean_text(get_current_user().get("username"))
