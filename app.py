@@ -72,6 +72,7 @@ DELIVERY_ORDER_DIR = UPLOADS_DIR / "delivery_orders"
 SERVICE_DOCS_DIR = UPLOADS_DIR / "service_documents"
 MAINTENANCE_DOCS_DIR = UPLOADS_DIR / "maintenance_documents"
 CUSTOMER_DOCS_DIR = UPLOADS_DIR / "customer_documents"
+OPERATIONS_OTHER_DIR = UPLOADS_DIR / "operations_other_documents"
 SERVICE_BILL_DIR = UPLOADS_DIR / "service_bills"
 REPORT_DOCS_DIR = UPLOADS_DIR / "report_documents"
 QUOTATION_RECEIPT_DIR = UPLOADS_DIR / "quotation_receipts"
@@ -1073,6 +1074,19 @@ CREATE TABLE IF NOT EXISTS customer_documents (
     FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_customer_documents_customer ON customer_documents(customer_id);
+CREATE TABLE IF NOT EXISTS operations_other_documents (
+    document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL,
+    description TEXT,
+    items_payload TEXT,
+    file_path TEXT,
+    original_name TEXT,
+    uploaded_by INTEGER,
+    uploaded_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE,
+    FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operations_other_documents_customer ON operations_other_documents(customer_id);
 CREATE TABLE IF NOT EXISTS import_history (
     import_id INTEGER PRIMARY KEY AUTOINCREMENT,
     customer_id INTEGER,
@@ -1185,6 +1199,14 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_log_created ON activity_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_log_entity ON activity_log(entity_type, entity_id);
+CREATE TABLE IF NOT EXISTS staff_admin_messages (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    message TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_staff_admin_messages_created_at ON staff_admin_messages(created_at DESC);
 CREATE TRIGGER IF NOT EXISTS prevent_admin_delete
 BEFORE DELETE ON users
 WHEN LOWER(OLD.role) = 'admin'
@@ -1384,6 +1406,39 @@ def ensure_schema_upgrades(conn):
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_dashboard_remarks_user ON dashboard_remarks(user_id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_admin_messages (
+            message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_staff_admin_messages_created_at ON staff_admin_messages(created_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operations_other_documents (
+            document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            description TEXT,
+            items_payload TEXT,
+            file_path TEXT,
+            original_name TEXT,
+            uploaded_by INTEGER,
+            uploaded_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE,
+            FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operations_other_documents_customer ON operations_other_documents(customer_id)"
     )
     conn.execute(
         """
@@ -3819,6 +3874,7 @@ def ensure_upload_dirs():
         SERVICE_DOCS_DIR,
         MAINTENANCE_DOCS_DIR,
         CUSTOMER_DOCS_DIR,
+        OPERATIONS_OTHER_DIR,
         SERVICE_BILL_DIR,
         REPORT_DOCS_DIR,
         QUOTATION_RECEIPT_DIR,
@@ -6623,6 +6679,53 @@ def dashboard(conn):
             f"{fmt_dates(announcement, ['created_at']).iloc[0]['created_at']}",
             icon="📢",
         )
+
+    st.markdown("##### Message admin")
+    if not is_admin:
+        with st.form("staff_message_form"):
+            staff_message = st.text_area(
+                "Send a message to the admin team",
+                key="staff_message_text",
+                help="Use this to request help or share updates with admins.",
+            )
+            submit_message = st.form_submit_button("Send message", type="primary")
+        if submit_message:
+            cleaned_message = clean_text(staff_message)
+            if not cleaned_message:
+                st.warning("Please enter a message before sending.")
+            else:
+                conn.execute(
+                    "INSERT INTO staff_admin_messages (user_id, message) VALUES (?, ?)",
+                    (current_user_id(), cleaned_message),
+                )
+                conn.commit()
+                st.success("Message sent to admin.")
+                st.session_state["staff_message_text"] = ""
+                _safe_rerun()
+    else:
+        messages_df = df_query(
+            conn,
+            dedent(
+                """
+                SELECT sam.message_id, sam.message, sam.created_at, u.username
+                FROM staff_admin_messages sam
+                LEFT JOIN users u ON u.user_id = sam.user_id
+                ORDER BY datetime(sam.created_at) DESC
+                LIMIT 10
+                """
+            ),
+        )
+        if messages_df.empty:
+            st.caption("No staff messages yet.")
+        else:
+            for _, row in messages_df.iterrows():
+                author = clean_text(row.get("username")) or "Staff"
+                created_at = pd.to_datetime(row.get("created_at"), errors="coerce")
+                created_label = (
+                    created_at.strftime("%d-%m-%Y %H:%M") if pd.notna(created_at) else ""
+                )
+                label_suffix = f" ({created_label})" if created_label else ""
+                st.info(f"**{author}**{label_suffix}\n\n{clean_text(row.get('message'))}")
 
     if is_admin:
         if st.session_state.pop("dashboard_remark_reset", False):
@@ -9617,6 +9720,45 @@ def _render_doc_detail_inputs(
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{key_prefix}_maintenance_receipt",
             )
+    elif doc_type == "Other":
+        items_key = f"{key_prefix}_other_items"
+        st.session_state.setdefault(items_key, _default_simple_items())
+        items_df = pd.DataFrame(st.session_state.get(items_key, []))
+        for col in ["description", "quantity", "unit_price", "total"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("unit_price"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        st.markdown("**Items purchased (optional)**")
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "unit_price"]],
+            key=f"{items_key}_editor",
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "description": st.column_config.TextColumn("Item"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+            },
+        )
+        items_records = (
+            edited_items.to_dict("records")
+            if isinstance(edited_items, pd.DataFrame)
+            else edited_items
+        )
+        details["items"] = items_records
+        st.session_state[items_key] = items_records
+        details["description"] = st.text_area(
+            "Description",
+            key=f"{key_prefix}_other_description",
+        )
     return details
 
 
@@ -9686,6 +9828,13 @@ def _save_customer_document_upload(
         if details.get("payment_status") in {"advanced", "paid"} and details.get("receipt_upload") is None:
             st.warning("Payment receipt is highly recommended for advanced or paid maintenance records.")
         details["items"] = items_clean
+    if doc_type == "Other":
+        if not clean_text(details.get("description")):
+            st.error("Description is required for other uploads.")
+            return False
+        items_input = details.get("items") or []
+        items_clean, _ = normalize_simple_items(items_input)
+        details["items"] = items_clean
 
     doc_dir_map = {
         "Delivery order": DELIVERY_ORDER_DIR,
@@ -9693,6 +9842,7 @@ def _save_customer_document_upload(
         "Quotation": QUOTATION_DOCS_DIR,
         "Service": SERVICE_DOCS_DIR,
         "Maintenance": MAINTENANCE_DOCS_DIR,
+        "Other": OPERATIONS_OTHER_DIR,
     }
     target_dir = doc_dir_map.get(doc_type, CUSTOMER_DOCS_DIR)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -9922,6 +10072,24 @@ def _save_customer_document_upload(
             VALUES (?, ?, ?)
             """,
             (maintenance_id, stored_path, safe_original),
+        )
+    elif doc_type == "Other":
+        items_clean = details.get("items") or []
+        items_payload = json.dumps(items_clean, ensure_ascii=False) if items_clean else None
+        conn.execute(
+            """
+            INSERT INTO operations_other_documents (
+                customer_id, description, items_payload, file_path, original_name, uploaded_by
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(customer_id),
+                clean_text(details.get("description")),
+                items_payload,
+                stored_path,
+                safe_original,
+                uploader_id,
+            ),
         )
 
     if new_product_labels:
@@ -10173,6 +10341,296 @@ def render_customer_document_uploader(
             )
         else:
             st.caption(f"{doc_type}: {label}{suffix} (file missing)")
+
+
+def render_operations_document_uploader(
+    conn,
+    *,
+    key_prefix: str,
+) -> None:
+    st.markdown("### Operations document uploads")
+    customer_options, customer_labels, _, _ = fetch_customer_choices(conn, only_complete=False)
+    customer_choices = [cid for cid in customer_options if cid is not None]
+    if not customer_choices:
+        st.info("No customers available for document uploads yet.")
+        return
+
+    selected_customer = st.selectbox(
+        "Customer",
+        customer_choices,
+        format_func=lambda cid: customer_labels.get(cid, f"Customer #{cid}"),
+        key=f"{key_prefix}_customer",
+    )
+    customer_seed = df_query(
+        conn,
+        """
+        SELECT name, company_name, phone, address, delivery_address, sales_person
+        FROM customers
+        WHERE customer_id=?
+        """,
+        (int(selected_customer),),
+    )
+    customer_record = customer_seed.iloc[0].to_dict() if not customer_seed.empty else {}
+
+    upload_cols = st.columns(2)
+    with upload_cols[0]:
+        st.markdown("**Delivery order (DO)**")
+        do_file = st.file_uploader(
+            "Delivery order upload",
+            type=None,
+            accept_multiple_files=False,
+            key=f"{key_prefix}_do_file",
+            help="Upload the delivery order PDF or image.",
+        )
+        _apply_ocr_autofill(
+            upload=do_file,
+            ocr_key_prefix=f"{key_prefix}_do_file",
+            doc_type="Delivery order",
+            details_key_prefix=f"{key_prefix}_do_details",
+        )
+        do_details = _render_doc_detail_inputs(
+            "Delivery order",
+            key_prefix=f"{key_prefix}_do_details",
+            defaults=customer_record,
+        )
+        submit_do = st.button(
+            "Save delivery order",
+            key=f"{key_prefix}_do_save",
+        )
+        if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
+            if do_file is None:
+                st.error("Select a delivery order document to upload.")
+            else:
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type="Delivery order",
+                    upload_file=do_file,
+                    details=do_details,
+                )
+                if saved:
+                    st.success("Delivery order uploaded.")
+                    _safe_rerun()
+
+    with upload_cols[1]:
+        st.markdown("**Work done**")
+        work_done_file = st.file_uploader(
+            "Work done upload",
+            type=None,
+            accept_multiple_files=False,
+            key=f"{key_prefix}_work_done_file",
+            help="Upload completed work slips or PDFs.",
+        )
+        _apply_ocr_autofill(
+            upload=work_done_file,
+            ocr_key_prefix=f"{key_prefix}_work_done_file",
+            doc_type="Work done",
+            details_key_prefix=f"{key_prefix}_work_done_details",
+        )
+        work_done_details = _render_doc_detail_inputs(
+            "Work done",
+            key_prefix=f"{key_prefix}_work_done_details",
+            defaults=customer_record,
+        )
+        submit_work_done = st.button(
+            "Save work done",
+            key=f"{key_prefix}_work_done_save",
+        )
+        if _guard_double_submit(f"{key_prefix}_work_done_save", submit_work_done):
+            if work_done_file is None:
+                st.error("Select a work done document to upload.")
+            else:
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type="Work done",
+                    upload_file=work_done_file,
+                    details=work_done_details,
+                )
+                if saved:
+                    st.success("Work done uploaded.")
+                    _safe_rerun()
+
+    upload_cols = st.columns(2)
+    with upload_cols[0]:
+        st.markdown("**Service**")
+        service_file = st.file_uploader(
+            "Service upload",
+            type=None,
+            accept_multiple_files=False,
+            key=f"{key_prefix}_service_file",
+            help="Upload service documents.",
+        )
+        _apply_ocr_autofill(
+            upload=service_file,
+            ocr_key_prefix=f"{key_prefix}_service_file",
+            doc_type="Service",
+            details_key_prefix=f"{key_prefix}_service_details",
+        )
+        service_details = _render_doc_detail_inputs(
+            "Service",
+            key_prefix=f"{key_prefix}_service_details",
+            defaults=customer_record,
+        )
+        submit_service = st.button(
+            "Save service",
+            key=f"{key_prefix}_service_save",
+        )
+        if _guard_double_submit(f"{key_prefix}_service_save", submit_service):
+            if service_file is None:
+                st.error("Select a service document to upload.")
+            else:
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type="Service",
+                    upload_file=service_file,
+                    details=service_details,
+                )
+                if saved:
+                    st.success("Service uploaded.")
+                    _safe_rerun()
+
+    with upload_cols[1]:
+        st.markdown("**Maintenance**")
+        maintenance_file = st.file_uploader(
+            "Maintenance upload",
+            type=None,
+            accept_multiple_files=False,
+            key=f"{key_prefix}_maintenance_file",
+            help="Upload maintenance documents.",
+        )
+        _apply_ocr_autofill(
+            upload=maintenance_file,
+            ocr_key_prefix=f"{key_prefix}_maintenance_file",
+            doc_type="Maintenance",
+            details_key_prefix=f"{key_prefix}_maintenance_details",
+        )
+        maintenance_details = _render_doc_detail_inputs(
+            "Maintenance",
+            key_prefix=f"{key_prefix}_maintenance_details",
+            defaults=customer_record,
+        )
+        submit_maintenance = st.button(
+            "Save maintenance",
+            key=f"{key_prefix}_maintenance_save",
+        )
+        if _guard_double_submit(f"{key_prefix}_maintenance_save", submit_maintenance):
+            if maintenance_file is None:
+                st.error("Select a maintenance document to upload.")
+            else:
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type="Maintenance",
+                    upload_file=maintenance_file,
+                    details=maintenance_details,
+                )
+                if saved:
+                    st.success("Maintenance uploaded.")
+                    _safe_rerun()
+
+    st.markdown("**Others**")
+    other_file = st.file_uploader(
+        "Other document upload",
+        type=None,
+        accept_multiple_files=False,
+        key=f"{key_prefix}_other_file",
+        help="Upload any other supporting document.",
+    )
+    other_details = _render_doc_detail_inputs(
+        "Other",
+        key_prefix=f"{key_prefix}_other_details",
+        defaults=customer_record,
+    )
+    submit_other = st.button(
+        "Save other upload",
+        key=f"{key_prefix}_other_save",
+    )
+    if _guard_double_submit(f"{key_prefix}_other_save", submit_other):
+        if other_file is None:
+            st.error("Select a document to upload.")
+        else:
+            saved = _save_customer_document_upload(
+                conn,
+                customer_id=int(selected_customer),
+                customer_record=customer_record,
+                doc_type="Other",
+                upload_file=other_file,
+                details=other_details,
+            )
+            if saved:
+                st.success("Other document uploaded.")
+                _safe_rerun()
+
+    docs_df = df_query(
+        conn,
+        """
+        SELECT document_id, doc_type, file_path, original_name, uploaded_at
+        FROM customer_documents
+        WHERE customer_id=?
+        ORDER BY datetime(uploaded_at) DESC, document_id DESC
+        """,
+        (int(selected_customer),),
+    )
+    st.markdown("#### Existing documents")
+    if docs_df.empty:
+        st.caption("No documents uploaded for this customer yet.")
+    else:
+        for _, row in docs_df.iterrows():
+            path = resolve_upload_path(row.get("file_path"))
+            label = clean_text(row.get("original_name")) or "(document)"
+            doc_type = clean_text(row.get("doc_type")) or "Document"
+            uploaded_at = pd.to_datetime(row.get("uploaded_at"), errors="coerce")
+            suffix = f" ({uploaded_at.strftime('%d-%m-%Y')})" if pd.notna(uploaded_at) else ""
+            if path and path.exists():
+                st.download_button(
+                    f"{doc_type}: {label}{suffix}",
+                    data=path.read_bytes(),
+                    file_name=path.name,
+                    key=f"{key_prefix}_download_{int(row['document_id'])}",
+                )
+            else:
+                st.caption(f"{doc_type}: {label}{suffix} (file missing)")
+
+    other_df = df_query(
+        conn,
+        """
+        SELECT document_id, description, items_payload, file_path, original_name, uploaded_at
+        FROM operations_other_documents
+        WHERE customer_id=?
+        ORDER BY datetime(uploaded_at) DESC, document_id DESC
+        """,
+        (int(selected_customer),),
+    )
+    if not other_df.empty:
+        st.markdown("#### Other purchase history")
+        for _, row in other_df.iterrows():
+            label = clean_text(row.get("description")) or "Other purchase"
+            uploaded_at = pd.to_datetime(row.get("uploaded_at"), errors="coerce")
+            date_label = uploaded_at.strftime("%d-%m-%Y") if pd.notna(uploaded_at) else ""
+            header = f"{label} {f'({date_label})' if date_label else ''}".strip()
+            with st.expander(header, expanded=False):
+                items_payload = clean_text(row.get("items_payload"))
+                if items_payload:
+                    try:
+                        items_rows = json.loads(items_payload)
+                    except (TypeError, ValueError):
+                        items_rows = []
+                    if items_rows:
+                        st.dataframe(pd.DataFrame(items_rows), use_container_width=True, hide_index=True)
+                path = resolve_upload_path(row.get("file_path"))
+                if path and path.exists():
+                    st.download_button(
+                        "Download document",
+                        data=path.read_bytes(),
+                        file_name=path.name,
+                        key=f"{key_prefix}_other_download_{int(row['document_id'])}",
+                    )
 
 
 def customers_page(conn):
@@ -15948,6 +16406,8 @@ def operations_page(conn):
             include_quotation_upload=False,
         )
     st.markdown("---")
+    render_operations_document_uploader(conn, key_prefix="operations_uploads")
+    st.markdown("---")
     record_options = {
         "Delivery orders": ("Delivery order", "delivery_order"),
         "Work done": ("Work done", "work_done"),
@@ -19192,6 +19652,9 @@ def reports_page(conn):
     if st.session_state.get("report_grid_current_id") != selected_report_id:
         st.session_state["report_grid_current_id"] = selected_report_id
         st.session_state.pop("report_grid_editor_state", None)
+        st.session_state.pop("report_grid_import_rows", None)
+        st.session_state.pop("report_grid_import_payload", None)
+        st.session_state.pop("report_grid_mapping_choices", None)
 
     editing_record: Optional[dict] = None
     if selected_report_id is not None and not selectable_reports.empty:
@@ -19612,6 +20075,14 @@ def reports_page(conn):
                     )
                     if display and display not in customer_options:
                         customer_options.append(display)
+            existing_customers = {
+                clean_text(row.get("customer_name"))
+                for row in (grid_seed_rows or [])
+                if clean_text(row.get("customer_name"))
+            }
+            for name in sorted(existing_customers):
+                if name and name not in customer_options:
+                    customer_options.append(name)
             if customer_options:
                 column_config["customer_name"] = st.column_config.SelectboxColumn(
                     "Customer Name",
@@ -19991,6 +20462,22 @@ def reports_page(conn):
             columns=["Template", *ALL_REPORT_DISPLAY_COLUMNS]
         )
         st.dataframe(entry_table, use_container_width=True)
+        progress_label = "Progress"
+        if progress_label in entry_table.columns:
+            progress_series = (
+                entry_table[progress_label]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+            )
+            total_rows = int(progress_series.shape[0])
+            done_rows = int((progress_series == "done").sum())
+            pending_rows = max(total_rows - done_rows, 0)
+            progress_cols = st.columns(3)
+            progress_cols[0].metric("Report rows", total_rows)
+            progress_cols[1].metric("Done", done_rows)
+            progress_cols[2].metric("Pending", pending_rows)
     else:
         st.info(
             "No structured report entries are available for the selected filters."
