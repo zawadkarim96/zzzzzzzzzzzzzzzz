@@ -20125,7 +20125,6 @@ def main():
             "Warranties",
             "Advanced Search",
             "Reports",
-            "Scraps & Duplicates",
             "Users (Admin)",
         ]
     else:
@@ -20136,7 +20135,6 @@ def main():
             "Quotation",
             "Warranties",
             "Reports",
-            "Scraps & Duplicates",
         ]
 
     if "nav_page" not in st.session_state:
@@ -20196,8 +20194,6 @@ def main():
         advanced_search_page(conn)
     elif page == "Reports":
         reports_page(conn)
-    elif page == "Scraps & Duplicates":
-        scraps_duplicates_page(conn)
     elif page == "Users (Admin)":
         users_admin_page(conn)
 
