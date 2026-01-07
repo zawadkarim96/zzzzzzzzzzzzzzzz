@@ -128,11 +128,28 @@ SERVICE_REPORT_FIELDS = OrderedDict(
         (
             "details_remarks",
             {
-                "label": "Details Remarks",
+                "label": "Remarks",
                 "type": "text",
-                "help": "Technician notes or actions taken.",
+                "help": "Notes or actions taken for this row.",
             },
         ),
+        (
+            "remarks_history",
+            {
+                "label": "Remarks history",
+                "type": "text",
+                "help": "Previous remarks captured for this row.",
+            },
+        ),
+        (
+            "phone",
+            {
+                "label": "Phone",
+                "type": "text",
+                "help": "Customer phone or contact number.",
+            },
+        ),
+        ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
         (
             "status",
             {
@@ -142,22 +159,21 @@ SERVICE_REPORT_FIELDS = OrderedDict(
             },
         ),
         (
+            "progress_status",
+            {
+                "label": "Progress",
+                "type": "select",
+                "options": ["Pending", "Done"],
+                "help": "Mark when this row is completed.",
+            },
+        ),
+        (
             "payment_status",
             {
                 "label": "Payment Status",
                 "type": "select",
                 "options": ["Pending", "Paid"],
                 "help": "Track whether the service has been paid.",
-            },
-        ),
-        (
-            "amount_spent",
-            {
-                "label": "Amount spent",
-                "type": "number",
-                "format": "%.2f",
-                "step": 100.0,
-                "help": "Amount spent or billed for this work.",
             },
         ),
         (
@@ -200,7 +216,7 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
         ),
         ("client_name", {"label": "Customer Name", "type": "text"}),
         ("address", {"label": "Address", "type": "text"}),
-        ("contact", {"label": "Contact", "type": "text"}),
+        ("contact", {"label": "Phone", "type": "text"}),
         ("product_detail", {"label": "Product Detail", "type": "text"}),
         ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
         (
@@ -212,8 +228,32 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
                 "help": "Track whether the follow-up is paid or still pending.",
             },
         ),
-        ("notes", {"label": "Notes", "type": "text"}),
+        (
+            "notes",
+            {
+                "label": "Remarks",
+                "type": "text",
+                "help": "Follow-up notes or updates for this row.",
+            },
+        ),
+        (
+            "remarks_history",
+            {
+                "label": "Remarks history",
+                "type": "text",
+                "help": "Previous remarks captured for this row.",
+            },
+        ),
         ("person_in_charge", {"label": "Person In Charge", "type": "text"}),
+        (
+            "progress_status",
+            {
+                "label": "Progress",
+                "type": "select",
+                "options": ["Pending", "Done"],
+                "help": "Mark when this follow-up is completed.",
+            },
+        ),
         (
             "reminder_date",
             {
@@ -653,6 +693,41 @@ def _summarize_grid_column(rows: Iterable[dict[str, object]], key: str) -> Optio
     if not values:
         return None
     return "\n".join(values)
+
+
+def _report_remarks_field(template_key: Optional[str]) -> str:
+    normalized = _normalize_report_template(template_key)
+    if normalized == "follow_up":
+        return "notes"
+    return "details_remarks"
+
+
+def _append_report_remarks_history(
+    rows: list[dict[str, object]],
+    previous_rows: list[dict[str, object]],
+    *,
+    template_key: Optional[str] = None,
+) -> list[dict[str, object]]:
+    remarks_key = _report_remarks_field(template_key)
+    history_key = "remarks_history"
+    now_stamp = datetime.now().strftime("%d-%m-%Y %H:%M")
+    updated_rows: list[dict[str, object]] = []
+    for idx, row in enumerate(rows):
+        updated = dict(row)
+        previous = previous_rows[idx] if idx < len(previous_rows) else {}
+        previous_history = clean_text(previous.get(history_key)) or ""
+        old_remark = clean_text(previous.get(remarks_key)) or ""
+        new_remark = clean_text(updated.get(remarks_key)) or ""
+        history_lines: list[str] = []
+        if previous_history:
+            history_lines.append(previous_history)
+        if old_remark and new_remark and new_remark != old_remark:
+            if not previous_history:
+                history_lines.append(f"Previous: {old_remark}")
+            history_lines.append(f"{now_stamp} - {new_remark}")
+        updated[history_key] = "\n".join(history_lines) if history_lines else previous_history
+        updated_rows.append(updated)
+    return updated_rows
 
 NOTIFICATION_BUFFER_KEY = "runtime_notifications"
 MAX_RUNTIME_NOTIFICATIONS = 40
@@ -16662,13 +16737,17 @@ def customer_summary_page(conn):
 
 
 def customers_hub_page(conn):
-    tabs = st.tabs(["Customers", "Customer Summary", "Import"])
+    tabs = st.tabs(["Customers", "Customer Summary", "Import", "Scraps", "Duplicates"])
     with tabs[0]:
         customers_page(conn)
     with tabs[1]:
         customer_summary_page(conn)
     with tabs[2]:
         import_page(conn)
+    with tabs[3]:
+        scraps_page(conn)
+    with tabs[4]:
+        duplicates_page(conn)
 
 
 def scraps_page(conn):
@@ -19412,7 +19491,7 @@ def reports_page(conn):
         )
         if period_choice == "daily":
             day_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 day_kwargs["min_value"] = today
                 day_kwargs["max_value"] = today
             day_value = st.date_input(
@@ -19427,7 +19506,7 @@ def reports_page(conn):
             base_start = default_start if editing_record else today - timedelta(days=today.weekday())
             base_end = default_end if editing_record else base_start + timedelta(days=6)
             week_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 week_kwargs["min_value"] = current_week_start
                 week_kwargs["max_value"] = current_week_end
             week_value = st.date_input(
@@ -19451,7 +19530,7 @@ def reports_page(conn):
             except Exception:
                 month_seed = date(today.year, today.month, 1)
             month_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 month_kwargs["min_value"] = current_month_start
                 month_kwargs["max_value"] = current_month_end
             month_value = st.date_input(
@@ -19496,14 +19575,16 @@ def reports_page(conn):
         grid_df_seed = pd.DataFrame(editor_seed, columns=fields.keys())
         column_config = _build_report_column_config(fields)
         disabled_columns: list[str] = []
+        if "remarks_history" in fields:
+            disabled_columns.append("remarks_history")
         if editing_record and not is_admin:
             if template_key in {"service", "sales"}:
-                editable_columns = {"details_remarks"}
-                helper_label = "Staff can update only the remarks column for existing reports."
+                editable_columns = {"details_remarks", "progress_status"}
+                helper_label = "Staff can update only the remarks and progress columns for existing reports."
             elif template_key == "follow_up":
-                editable_columns = {"notes", "reminder_date"}
+                editable_columns = {"notes", "reminder_date", "progress_status"}
                 helper_label = (
-                    "Staff can update only the remarks and reminder date columns for existing follow-up reports."
+                    "Staff can update only the remarks, progress, and reminder date columns for existing follow-up reports."
                 )
             else:
                 editable_columns = set()
@@ -19576,6 +19657,16 @@ def reports_page(conn):
         grid_rows_to_store = _grid_rows_from_editor(
             report_grid_df, template_key=template_key
         )
+        if editing_record:
+            previous_grid_rows = parse_report_grid_payload(
+                clean_text(editing_record.get("grid_payload")),
+                template_key=template_key,
+            )
+            grid_rows_to_store = _append_report_remarks_history(
+                grid_rows_to_store,
+                previous_grid_rows,
+                template_key=template_key,
+            )
         st.session_state.pop("report_grid_editor_state", None)
         summary_fields = REPORT_TEMPLATE_SUMMARY_FIELDS.get(
             template_key, REPORT_TEMPLATE_SUMMARY_FIELDS["service"]
