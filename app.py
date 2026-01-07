@@ -7341,6 +7341,113 @@ def dashboard(conn):
                             key=f"dashboard_report_file_{row.get('report_id')}_{label}",
                         )
 
+        uploaded_quotes = df_query(
+            conn,
+            dedent(
+                """
+                SELECT q.quotation_id,
+                       q.reference,
+                       q.customer_company,
+                       q.customer_name,
+                       q.customer_contact,
+                       q.total_amount,
+                       q.status,
+                       q.quote_date,
+                       q.document_path,
+                       q.follow_up_status,
+                       q.follow_up_date,
+                       q.follow_up_notes,
+                       q.salesperson_name,
+                       q.updated_at,
+                       COALESCE(u.username, 'User #' || q.created_by) AS owner
+                FROM quotations q
+                LEFT JOIN users u ON u.user_id = q.created_by
+                WHERE q.document_path IS NOT NULL AND q.document_path != ''
+                  AND q.deleted_at IS NULL
+                ORDER BY datetime(q.updated_at) DESC, datetime(q.quote_date) DESC, q.quotation_id DESC
+                LIMIT 12
+                """
+            ),
+        )
+
+        if not uploaded_quotes.empty:
+            uploaded_quotes = fmt_dates(
+                uploaded_quotes, ["quote_date", "follow_up_date", "updated_at"]
+            )
+            uploaded_quotes["quotation_id"] = uploaded_quotes["quotation_id"].apply(
+                lambda value: int(_coerce_float(value, 0))
+            )
+            with st.expander("Uploaded quotation details", expanded=False):
+                option_labels = {
+                    int(row["quotation_id"]): (
+                        f"{clean_text(row.get('reference')) or 'Quotation'} • "
+                        f"{clean_text(row.get('customer_company')) or clean_text(row.get('customer_name')) or 'Customer'}"
+                    )
+                    for _, row in uploaded_quotes.iterrows()
+                }
+                quote_options = list(option_labels.keys())
+                selected_quote_id = st.selectbox(
+                    "Select a quotation to inspect",
+                    quote_options,
+                    format_func=lambda qid: option_labels.get(qid, f"Quotation #{qid}"),
+                    key="dashboard_uploaded_quote_selector",
+                )
+
+                quote_match = uploaded_quotes[
+                    uploaded_quotes["quotation_id"] == selected_quote_id
+                ].iloc[0]
+                left, right = st.columns((2, 1))
+                customer_lines = [
+                    f"**Customer:** {clean_text(quote_match.get('customer_company')) or clean_text(quote_match.get('customer_name')) or '—'}",
+                    f"**Contact:** {clean_text(quote_match.get('customer_contact')) or '—'}",
+                ]
+                if quote_match.get("follow_up_status"):
+                    follow_label = clean_text(quote_match.get("follow_up_status"))
+                    follow_date = clean_text(quote_match.get("follow_up_date")) or "—"
+                    customer_lines.append(
+                        f"**Follow-up:** {follow_label.title()} • {follow_date}"
+                    )
+                if quote_match.get("follow_up_notes"):
+                    customer_lines.append(
+                        f"**Admin remarks:** {clean_text(quote_match.get('follow_up_notes'))}"
+                    )
+                left.markdown("\n".join(customer_lines))
+
+                status_label = clean_text(quote_match.get("status")) or "Pending"
+                amount_label = format_money(quote_match.get("total_amount")) or f"{_coerce_float(quote_match.get('total_amount'), 0.0):,.2f}"
+                right.metric(
+                    "Total (BDT)",
+                    amount_label,
+                    help=f"Status: {status_label.title()}",
+                )
+                right.caption(
+                    f"Sales: {clean_text(quote_match.get('salesperson_name')) or clean_text(quote_match.get('owner')) or '—'}"
+                )
+                right.caption(
+                    f"Last updated {format_time_ago(quote_match.get('updated_at')) or quote_match.get('updated_at') or '—'}"
+                )
+
+                doc_path = clean_text(quote_match.get("document_path"))
+                resolved_path = resolve_upload_path(doc_path)
+                if resolved_path and resolved_path.exists():
+                    try:
+                        payload = resolved_path.read_bytes()
+                    except OSError:
+                        payload = None
+                    if payload:
+                        st.download_button(
+                            "Download uploaded quotation",
+                            payload,
+                            file_name=resolved_path.name,
+                            key=f"dashboard_quote_download_{selected_quote_id}",
+                        )
+                    else:
+                        st.warning(
+                            "The uploaded quotation file could not be read.", icon="⚠️"
+                        )
+                else:
+                    st.caption("Uploaded quotation file not found on disk.")
+
     if is_admin:
         _render_admin_record_history(conn)
 
@@ -7475,107 +7582,6 @@ def dashboard(conn):
                     else:
                         cols[3].caption("File missing")
                 st.markdown("</div>", unsafe_allow_html=True)
-
-        uploaded_quotes = df_query(
-            conn,
-            dedent(
-                """
-                SELECT q.quotation_id,
-                       q.reference,
-                       q.customer_company,
-                       q.customer_name,
-                       q.customer_contact,
-                       q.total_amount,
-                       q.status,
-                       q.quote_date,
-                       q.document_path,
-                       q.follow_up_status,
-                       q.follow_up_date,
-                       q.follow_up_notes,
-                       q.salesperson_name,
-                       q.updated_at,
-                       COALESCE(u.username, 'User #' || q.created_by) AS owner
-                FROM quotations q
-                LEFT JOIN users u ON u.user_id = q.created_by
-                WHERE q.document_path IS NOT NULL AND q.document_path != ''
-                  AND q.deleted_at IS NULL
-                ORDER BY datetime(q.updated_at) DESC, datetime(q.quote_date) DESC, q.quotation_id DESC
-                LIMIT 12
-                """
-            ),
-        )
-
-        if not uploaded_quotes.empty:
-            uploaded_quotes = fmt_dates(
-                uploaded_quotes, ["quote_date", "follow_up_date", "updated_at"]
-            )
-            uploaded_quotes["quotation_id"] = uploaded_quotes["quotation_id"].apply(
-                lambda value: int(_coerce_float(value, 0))
-            )
-            st.markdown("#### Uploaded quotation details")
-            option_labels = {
-                int(row["quotation_id"]): (
-                    f"{clean_text(row.get('reference')) or 'Quotation'} • "
-                    f"{clean_text(row.get('customer_company')) or clean_text(row.get('customer_name')) or 'Customer'}"
-                )
-                for _, row in uploaded_quotes.iterrows()
-            }
-            quote_options = list(option_labels.keys())
-            selected_quote_id = st.selectbox(
-                "Select a quotation to inspect",
-                quote_options,
-                format_func=lambda qid: option_labels.get(qid, f"Quotation #{qid}"),
-                key="dashboard_uploaded_quote_selector",
-            )
-
-            quote_match = uploaded_quotes[
-                uploaded_quotes["quotation_id"] == selected_quote_id
-            ].iloc[0]
-            left, right = st.columns((2, 1))
-            customer_lines = [
-                f"**Customer:** {clean_text(quote_match.get('customer_company')) or clean_text(quote_match.get('customer_name')) or '—'}",
-                f"**Contact:** {clean_text(quote_match.get('customer_contact')) or '—'}",
-            ]
-            if quote_match.get("follow_up_status"):
-                follow_label = clean_text(quote_match.get("follow_up_status"))
-                follow_date = clean_text(quote_match.get("follow_up_date")) or "—"
-                customer_lines.append(
-                    f"**Follow-up:** {follow_label.title()} • {follow_date}"
-                )
-            if quote_match.get("follow_up_notes"):
-                customer_lines.append(
-                    f"**Admin remarks:** {clean_text(quote_match.get('follow_up_notes'))}"
-                )
-            left.markdown("\n".join(customer_lines))
-
-            status_label = clean_text(quote_match.get("status")) or "Pending"
-            amount_label = format_money(quote_match.get("total_amount")) or f"{_coerce_float(quote_match.get('total_amount'), 0.0):,.2f}"
-            right.metric("Total (BDT)", amount_label, help=f"Status: {status_label.title()}")
-            right.caption(
-                f"Sales: {clean_text(quote_match.get('salesperson_name')) or clean_text(quote_match.get('owner')) or '—'}"
-            )
-            right.caption(
-                f"Last updated {format_time_ago(quote_match.get('updated_at')) or quote_match.get('updated_at') or '—'}"
-            )
-
-            doc_path = clean_text(quote_match.get("document_path"))
-            resolved_path = resolve_upload_path(doc_path)
-            if resolved_path and resolved_path.exists():
-                try:
-                    payload = resolved_path.read_bytes()
-                except OSError:
-                    payload = None
-                if payload:
-                    st.download_button(
-                        "Download uploaded quotation",
-                        payload,
-                        file_name=resolved_path.name,
-                        key=f"dashboard_quote_download_{selected_quote_id}",
-                    )
-                else:
-                    st.warning("The uploaded quotation file could not be read.", icon="⚠️")
-            else:
-                st.caption("Uploaded quotation file not found on disk.")
 
     quote_scope, quote_params = _quotation_scope_filter()
     quote_clause = quote_scope.replace("WHERE", "WHERE", 1)
