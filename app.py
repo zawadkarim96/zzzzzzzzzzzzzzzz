@@ -128,9 +128,9 @@ SERVICE_REPORT_FIELDS = OrderedDict(
         (
             "details_remarks",
             {
-                "label": "Details Remarks",
+                "label": "Remarks",
                 "type": "text",
-                "help": "Technician notes or actions taken.",
+                "help": "Notes or actions taken for this row.",
             },
         ),
         (
@@ -148,16 +148,6 @@ SERVICE_REPORT_FIELDS = OrderedDict(
                 "type": "select",
                 "options": ["Pending", "Paid"],
                 "help": "Track whether the service has been paid.",
-            },
-        ),
-        (
-            "amount_spent",
-            {
-                "label": "Amount spent",
-                "type": "number",
-                "format": "%.2f",
-                "step": 100.0,
-                "help": "Amount spent or billed for this work.",
             },
         ),
         (
@@ -212,7 +202,14 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
                 "help": "Track whether the follow-up is paid or still pending.",
             },
         ),
-        ("notes", {"label": "Notes", "type": "text"}),
+        (
+            "notes",
+            {
+                "label": "Remarks",
+                "type": "text",
+                "help": "Follow-up notes or updates for this row.",
+            },
+        ),
         ("person_in_charge", {"label": "Person In Charge", "type": "text"}),
         (
             "reminder_date",
@@ -19412,7 +19409,7 @@ def reports_page(conn):
         )
         if period_choice == "daily":
             day_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 day_kwargs["min_value"] = today
                 day_kwargs["max_value"] = today
             day_value = st.date_input(
@@ -19427,7 +19424,7 @@ def reports_page(conn):
             base_start = default_start if editing_record else today - timedelta(days=today.weekday())
             base_end = default_end if editing_record else base_start + timedelta(days=6)
             week_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 week_kwargs["min_value"] = current_week_start
                 week_kwargs["max_value"] = current_week_end
             week_value = st.date_input(
@@ -19451,7 +19448,7 @@ def reports_page(conn):
             except Exception:
                 month_seed = date(today.year, today.month, 1)
             month_kwargs: dict[str, object] = {}
-            if not is_admin:
+            if not is_admin and not editing_record:
                 month_kwargs["min_value"] = current_month_start
                 month_kwargs["max_value"] = current_month_end
             month_value = st.date_input(
