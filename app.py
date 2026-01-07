@@ -8646,6 +8646,7 @@ def render_customer_quick_edit_section(
     action_icon_only: bool = False,
     use_popover: bool = True,
     include_quotation_upload: bool = True,
+    enable_uploads: bool = True,
 ) -> pd.DataFrame:
     pagination_enabled = enable_pagination and show_editor and not include_leads
     if show_filters:
@@ -8992,15 +8993,17 @@ def render_customer_quick_edit_section(
         return docs_map
 
     docs_map = _build_quick_view_documents(customer_ids)
-    doc_type_options = [
-        "Delivery order",
-        "Work done",
-        "Service",
-        "Maintenance",
-        "Other",
-    ]
-    if include_quotation_upload:
-        doc_type_options.insert(2, "Quotation")
+    doc_type_options = []
+    if enable_uploads:
+        doc_type_options = [
+            "Delivery order",
+            "Work done",
+            "Service",
+            "Maintenance",
+            "Other",
+        ]
+        if include_quotation_upload:
+            doc_type_options.insert(2, "Quotation")
     base_widths = [
         1.2,
         1.2,
@@ -9015,7 +9018,10 @@ def render_customer_quick_edit_section(
         base_widths.append(1.0)
     if show_duplicate:
         base_widths.append(0.9)
-    base_widths.extend([1.0, 2.2, 1.0])
+    if enable_uploads:
+        base_widths.extend([1.0, 2.2, 1.0])
+    else:
+        base_widths.extend([1.0, 1.0])
     widths = [0.5, *base_widths] if show_id else base_widths
     header_cols = st.columns(tuple(widths))
     header_idx = 0
@@ -9038,9 +9044,12 @@ def render_customer_quick_edit_section(
         header_cols[header_idx + col_offset].write("**Duplicate**")
         col_offset += 1
     header_cols[header_idx + col_offset].write("**View**")
-    header_cols[header_idx + col_offset + 1].write("**Upload**")
+    action_offset = col_offset + 1
+    if enable_uploads:
+        header_cols[header_idx + col_offset + 1].write("**Upload**")
+        action_offset = col_offset + 2
     action_label = "**Action**" if not action_icon_only else "**Delete**"
-    header_cols[header_idx + col_offset + 2].write(action_label)
+    header_cols[header_idx + action_offset].write(action_label)
     editor_rows: list[dict[str, object]] = []
     for row in editor_df.to_dict("records"):
         cid = int_or_none(row.get("id"))
@@ -9163,58 +9172,60 @@ def render_customer_quick_edit_section(
                     else:
                         st.caption(f"{label}{suffix} (file missing)")
         col_offset += 1
-        upload_container = getattr(st, "popover", None)
-        upload_target = row_cols[row_idx + col_offset]
-        if use_popover and callable(upload_container):
-            upload_panel = upload_target.popover("Upload", use_container_width=True)
-        else:
-            upload_panel = upload_target.expander("Upload", expanded=False)
-        with upload_panel:
-            with st.form(f"{upload_key}_form"):
-                doc_type = st.selectbox(
-                    "Document type",
-                    options=doc_type_options,
-                    key=file_type_key,
-                )
-                upload_file = st.file_uploader(
-                    "Upload document",
-                    type=None,
-                    accept_multiple_files=False,
-                    key=upload_key,
-                )
-                details = _render_doc_detail_inputs(
-                    doc_type,
-                    key_prefix=f"{upload_key}_details",
-                    defaults=row,
-                )
-                doc_type_emoji = {
-                    "Delivery order": "🚚",
-                    "Work done": "✅",
-                    "Quotation": "🧾",
-                    "Service": "🛠️",
-                    "Maintenance": "🧰",
-                    "Other": "📎",
-                }
-                upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
-                upload_clicked = st.form_submit_button(upload_label)
-            if _guard_double_submit(upload_btn_key, upload_clicked):
-                if upload_file is None:
-                    st.warning("Select a file to upload.")
-                else:
-                    saved = _save_customer_document_upload(
-                        conn,
-                        customer_id=cid,
-                        customer_record=row,
-                        doc_type=doc_type,
-                        upload_file=upload_file,
-                        details=details,
+        if enable_uploads:
+            upload_container = getattr(st, "popover", None)
+            upload_target = row_cols[row_idx + col_offset]
+            if use_popover and callable(upload_container):
+                upload_panel = upload_target.popover("Upload", use_container_width=True)
+            else:
+                upload_panel = upload_target.expander("Upload", expanded=False)
+            with upload_panel:
+                with st.form(f"{upload_key}_form"):
+                    doc_type = st.selectbox(
+                        "Document type",
+                        options=doc_type_options,
+                        key=file_type_key,
                     )
-                    if saved:
-                        st.success("Document uploaded.")
-                        _safe_rerun()
+                    upload_file = st.file_uploader(
+                        "Upload document",
+                        type=None,
+                        accept_multiple_files=False,
+                        key=upload_key,
+                    )
+                    details = _render_doc_detail_inputs(
+                        doc_type,
+                        key_prefix=f"{upload_key}_details",
+                        defaults=row,
+                    )
+                    doc_type_emoji = {
+                        "Delivery order": "🚚",
+                        "Work done": "✅",
+                        "Quotation": "🧾",
+                        "Service": "🛠️",
+                        "Maintenance": "🧰",
+                        "Other": "📎",
+                    }
+                    upload_label = f"{doc_type_emoji.get(doc_type, '📎')} Upload {doc_type}"
+                    upload_clicked = st.form_submit_button(upload_label)
+                if _guard_double_submit(upload_btn_key, upload_clicked):
+                    if upload_file is None:
+                        st.warning("Select a file to upload.")
+                    else:
+                        saved = _save_customer_document_upload(
+                            conn,
+                            customer_id=cid,
+                            customer_record=row,
+                            doc_type=doc_type,
+                            upload_file=upload_file,
+                            details=details,
+                        )
+                        if saved:
+                            st.success("Document uploaded.")
+                            _safe_rerun()
+            col_offset += 1
         st.session_state.setdefault(action_key, "Keep")
         action_value = st.session_state.get(action_key, "Keep")
-        action_col = row_cols[row_idx + col_offset + 1]
+        action_col = row_cols[row_idx + col_offset]
         if action_icon_only:
             row_created_by = int_or_none(original_map.get(cid, {}).get("created_by"))
             can_delete_row = is_admin or (
@@ -16519,6 +16530,7 @@ def operations_page(conn):
             action_icon_only=True,
             use_popover=True,
             include_quotation_upload=False,
+            enable_uploads=False,
         )
     st.markdown("---")
     render_operations_document_uploader(conn, key_prefix="operations_uploads")
