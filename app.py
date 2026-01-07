@@ -26,6 +26,7 @@ from textwrap import dedent
 import pandas as pd
 from PIL import Image, ImageOps, ImageEnhance
 from pypdf import PdfReader
+import pytesseract
 
 from openpyxl import load_workbook
 
@@ -1823,19 +1824,29 @@ def _extract_text_from_quotation_upload(upload) -> tuple[str, list[str]]:
     suffix = Path(upload.name).suffix.lower()
     file_bytes = upload.getvalue()
 
-    def _ocr_image(image: Image.Image) -> str:
+    def _ensure_ocr_engine_available() -> bool:
         global _OCR_ENGINE_AVAILABLE
+        if _OCR_ENGINE_AVAILABLE is True:
+            return True
         if _OCR_ENGINE_AVAILABLE is False:
-            return ""
+            return False
         try:
-            import pytesseract
+            pytesseract.get_tesseract_version()
             _OCR_ENGINE_AVAILABLE = True
-        except Exception:  # pragma: no cover - optional dependency
-            if _OCR_ENGINE_AVAILABLE is None:
-                warnings.append(
-                    "Install pytesseract and Tesseract OCR to read text from images."
-                )
+            return True
+        except pytesseract.TesseractNotFoundError:
+            warnings.append(
+                "OCR engine unavailable. Install Tesseract OCR and ensure it is on your PATH."
+            )
             _OCR_ENGINE_AVAILABLE = False
+            return False
+        except Exception as exc:  # pragma: no cover - defensive for OCR init failures
+            warnings.append(f"OCR failed to initialize: {exc}")
+            _OCR_ENGINE_AVAILABLE = False
+            return False
+
+    def _ocr_image(image: Image.Image) -> str:
+        if not _ensure_ocr_engine_available():
             return ""
 
         try:
@@ -1852,6 +1863,12 @@ def _extract_text_from_quotation_upload(upload) -> tuple[str, list[str]]:
             inverted = ImageEnhance.Contrast(inverted).enhance(1.6)
             alt_text = pytesseract.image_to_string(inverted)
             return alt_text if len(alt_text.strip()) > len(primary_text.strip()) else primary_text
+        except pytesseract.TesseractNotFoundError:
+            _OCR_ENGINE_AVAILABLE = False
+            warnings.append(
+                "OCR engine unavailable. Install Tesseract OCR and ensure it is on your PATH."
+            )
+            return ""
         except Exception as exc:  # pragma: no cover - defensive against OCR failures
             warnings.append(f"OCR failed: {exc}")
             return ""
