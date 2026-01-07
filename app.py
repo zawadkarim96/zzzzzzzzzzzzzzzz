@@ -6667,26 +6667,7 @@ def dashboard(conn):
 
     st.markdown("##### Message admin")
     if not is_admin:
-        with st.form("staff_message_form"):
-            staff_message = st.text_area(
-                "Send a message to the admin team",
-                key="staff_message_text",
-                help="Use this to request help or share updates with admins.",
-            )
-            submit_message = st.form_submit_button("Send message", type="primary")
-        if submit_message:
-            cleaned_message = clean_text(staff_message)
-            if not cleaned_message:
-                st.warning("Please enter a message before sending.")
-            else:
-                conn.execute(
-                    "INSERT INTO staff_admin_messages (user_id, message) VALUES (?, ?)",
-                    (current_user_id(), cleaned_message),
-                )
-                conn.commit()
-                st.success("Message sent to admin.")
-                st.session_state["staff_message_text"] = ""
-                _safe_rerun()
+        st.caption("Staff messaging is disabled.")
     else:
         messages_df = df_query(
             conn,
@@ -19766,6 +19747,12 @@ def reports_page(conn):
     st.markdown("##### Import report data")
     import_payload = st.session_state.get("report_grid_import_payload")
     import_payload_is_new = False
+    if st.session_state.pop("report_grid_importer_reset", False):
+        st.session_state["report_grid_importer"] = None
+        st.session_state.pop("report_grid_import_payload", None)
+        st.session_state.pop("report_grid_mapping_choices", None)
+        st.session_state.pop("report_grid_mapping_saved", None)
+
     import_file = st.file_uploader(
         "Upload report grid (Excel or CSV)",
         type=["xlsx", "xls", "csv"],
@@ -19802,6 +19789,11 @@ def reports_page(conn):
                     st.success(
                         f"Loaded {len(imported_rows)} row(s) from the uploaded file. They are ready in the grid below."
                     )
+                    st.session_state.pop("report_grid_import_payload", None)
+                    st.session_state.pop("report_grid_mapping_choices", None)
+                    st.session_state.pop("report_grid_mapping_saved", None)
+                    st.session_state["report_grid_importer_reset"] = True
+                    _safe_rerun()
                 else:
                     st.warning(
                         "We could not read any matching columns from that file. Adjust the mapping below to continue.",
@@ -19847,7 +19839,11 @@ def reports_page(conn):
                     st.success(
                         f"Loaded {len(imported_rows)} row(s) using the selected mapping."
                     )
-                    st.session_state["report_grid_mapping_saved"] = True
+                    st.session_state.pop("report_grid_import_payload", None)
+                    st.session_state.pop("report_grid_mapping_choices", None)
+                    st.session_state.pop("report_grid_mapping_saved", None)
+                    st.session_state["report_grid_importer_reset"] = True
+                    _safe_rerun()
                 else:
                     st.warning(
                         "No rows were imported with that mapping. Please review the selections and try again.",
