@@ -20212,7 +20212,7 @@ def reports_page(conn):
     import_payload = st.session_state.get("report_grid_import_payload")
     import_payload_is_new = False
     if st.session_state.pop("report_grid_importer_reset", False):
-        st.session_state["report_grid_importer"] = None
+        st.session_state.pop("report_grid_importer", None)
         st.session_state.pop("report_grid_import_payload", None)
         st.session_state.pop("report_grid_mapping_choices", None)
         st.session_state.pop("report_grid_mapping_saved", None)
