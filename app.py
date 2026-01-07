@@ -1206,7 +1206,7 @@ END;
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
     conn.execute("PRAGMA journal_mode = WAL;")
     return conn
 
@@ -10160,7 +10160,7 @@ def _save_customer_document_upload(
             INSERT INTO services (
                 customer_id, service_date, description, remarks, service_product_info,
                 status, payment_status, payment_receipt_path, bill_amount, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(customer_id),
@@ -10204,7 +10204,7 @@ def _save_customer_document_upload(
             INSERT INTO maintenance_records (
                 customer_id, maintenance_date, description, remarks, maintenance_product_info,
                 status, payment_status, payment_receipt_path, total_amount, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(customer_id),
