@@ -1016,6 +1016,7 @@ CREATE TABLE IF NOT EXISTS maintenance_records (
     status TEXT DEFAULT 'In progress',
     remarks TEXT,
     maintenance_product_info TEXT,
+    total_amount REAL,
     updated_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY(do_number) REFERENCES delivery_orders(do_number) ON DELETE SET NULL,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL
@@ -1282,6 +1283,7 @@ def ensure_schema_upgrades(conn):
     add_column("maintenance_records", "maintenance_start_date", "TEXT")
     add_column("maintenance_records", "maintenance_end_date", "TEXT")
     add_column("maintenance_records", "maintenance_product_info", "TEXT")
+    add_column("maintenance_records", "total_amount", "REAL")
 
     ensure_trigger(
         "prevent_admin_delete",
@@ -1649,34 +1651,119 @@ def sales_scope_filter(alias: str = "d") -> tuple[str, tuple[object, ...]]:
 
 
 def fetch_sales_metrics(conn, scope_clause: str, scope_params: tuple[object, ...]) -> dict[str, float]:
-    base_filters = [
-        "d.deleted_at IS NULL",
-        "COALESCE(d.record_type, 'delivery_order') IN ('delivery_order', 'work_done')",
-        "d.status = 'paid'",
-        "d.total_amount IS NOT NULL",
-    ]
-    if scope_clause:
-        base_filters.append(scope_clause)
-    base_where = " AND ".join(base_filters)
+    is_admin = current_user_is_admin()
+    user_id = current_user_id()
 
-    def _sum_for(where_clause: str, params: tuple[object, ...]) -> float:
+    def _sum_delivery(where_clause: str, params: tuple[object, ...]) -> float:
+        filters = [
+            "d.deleted_at IS NULL",
+            "COALESCE(d.record_type, 'delivery_order') IN ('delivery_order', 'work_done')",
+            "d.status = 'paid'",
+            "d.total_amount IS NOT NULL",
+        ]
+        if scope_clause:
+            filters.append(scope_clause)
         query = dedent(
             f"""
             SELECT COALESCE(SUM(d.total_amount), 0) AS total
             FROM delivery_orders d
             LEFT JOIN customers c ON c.customer_id = d.customer_id
-            WHERE {base_where} AND {where_clause}
+            WHERE {" AND ".join(filters)} AND {where_clause}
             """
         )
         row = conn.execute(query, params).fetchone()
         return float(row[0] or 0)
 
+    def _sum_quotations(where_clause: str) -> float:
+        filters = [
+            "q.deleted_at IS NULL",
+            "q.status = 'paid'",
+            "q.total_amount IS NOT NULL",
+        ]
+        params: list[object] = []
+        if not is_admin and user_id is not None:
+            filters.append("q.created_by = ?")
+            params.append(user_id)
+        query = dedent(
+            f"""
+            SELECT COALESCE(SUM(q.total_amount), 0) AS total
+            FROM quotations q
+            WHERE {" AND ".join(filters)} AND {where_clause}
+            """
+        )
+        row = conn.execute(query, tuple(params)).fetchone()
+        return float(row[0] or 0)
+
+    def _sum_services(where_clause: str) -> float:
+        filters = [
+            "s.payment_status = 'paid'",
+            "s.bill_amount IS NOT NULL",
+        ]
+        params: list[object] = []
+        if not is_admin and user_id is not None:
+            filters.append("(s.created_by = ? OR c.created_by = ?)")
+            params.extend([user_id, user_id])
+        query = dedent(
+            f"""
+            SELECT COALESCE(SUM(s.bill_amount), 0) AS total
+            FROM services s
+            LEFT JOIN customers c ON c.customer_id = s.customer_id
+            WHERE {" AND ".join(filters)} AND {where_clause}
+            """
+        )
+        row = conn.execute(query, tuple(params)).fetchone()
+        return float(row[0] or 0)
+
+    def _sum_maintenance(where_clause: str) -> float:
+        filters = [
+            "m.payment_status = 'paid'",
+            "m.total_amount IS NOT NULL",
+        ]
+        params: list[object] = []
+        if not is_admin and user_id is not None:
+            filters.append("(m.created_by = ? OR c.created_by = ?)")
+            params.extend([user_id, user_id])
+        query = dedent(
+            f"""
+            SELECT COALESCE(SUM(m.total_amount), 0) AS total
+            FROM maintenance_records m
+            LEFT JOIN customers c ON c.customer_id = m.customer_id
+            WHERE {" AND ".join(filters)} AND {where_clause}
+            """
+        )
+        row = conn.execute(query, tuple(params)).fetchone()
+        return float(row[0] or 0)
+
+    def _sum_all(
+        delivery_clause: str,
+        quote_clause: str,
+        service_clause: str,
+        maintenance_clause: str,
+    ) -> float:
+        delivery_total = _sum_delivery(delivery_clause, scope_params)
+        quote_total = _sum_quotations(quote_clause)
+        service_total = _sum_services(service_clause)
+        maintenance_total = _sum_maintenance(maintenance_clause)
+        return delivery_total + quote_total + service_total + maintenance_total
+
     return {
-        "daily": _sum_for("date(d.created_at) = date('now')", scope_params),
-        "weekly": _sum_for("date(d.created_at) >= date('now', '-6 day')", scope_params),
-        "monthly": _sum_for(
+        "daily": _sum_all(
+            "date(d.created_at) = date('now')",
+            "date(q.created_at) = date('now')",
+            "date(s.updated_at) = date('now')",
+            "date(m.updated_at) = date('now')",
+        ),
+        "weekly": _sum_all(
+            "date(d.created_at) >= date('now', '-6 day')",
+            "date(q.created_at) >= date('now', '-6 day')",
+            "date(s.updated_at) >= date('now', '-6 day')",
+            "date(m.updated_at) >= date('now', '-6 day')",
+        ),
+        "monthly": _sum_all(
             "strftime('%Y-%m', d.created_at) = strftime('%Y-%m', 'now')",
-            scope_params,
+            "strftime('%Y-%m', q.created_at) = strftime('%Y-%m', 'now')",
+            "strftime('%Y-%m', s.updated_at) = strftime('%Y-%m', 'now')",
+            "strftime('%Y-%m', m.updated_at) = strftime('%Y-%m', 'now')",
         ),
     }
 
@@ -9751,6 +9838,71 @@ def _render_doc_detail_inputs(
     return details
 
 
+def _clear_operations_upload_state(
+    *,
+    file_key: str,
+    details_key_prefix: str,
+    doc_type: str,
+) -> None:
+    keys_to_clear = [
+        file_key,
+        f"{file_key}_ocr_token",
+        f"{file_key}_ocr_text",
+        f"{file_key}_ocr_warnings",
+    ]
+    if doc_type in ("Delivery order", "Work done"):
+        keys_to_clear.extend(
+            [
+                f"{details_key_prefix}_delivery_items",
+                f"{details_key_prefix}_delivery_items_editor",
+                f"{details_key_prefix}_do_number",
+                f"{details_key_prefix}_do_status",
+                f"{details_key_prefix}_do_person_in_charge",
+                f"{details_key_prefix}_do_description",
+                f"{details_key_prefix}_do_remarks",
+                f"{details_key_prefix}_do_advance_taken",
+                f"{details_key_prefix}_do_advance_receipt",
+                f"{details_key_prefix}_do_receipt",
+            ]
+        )
+    elif doc_type == "Service":
+        keys_to_clear.extend(
+            [
+                f"{details_key_prefix}_service_items",
+                f"{details_key_prefix}_service_items_editor",
+                f"{details_key_prefix}_service_date",
+                f"{details_key_prefix}_service_description",
+                f"{details_key_prefix}_service_remarks",
+                f"{details_key_prefix}_service_payment_status",
+                f"{details_key_prefix}_service_person_in_charge",
+                f"{details_key_prefix}_service_receipt",
+            ]
+        )
+    elif doc_type == "Maintenance":
+        keys_to_clear.extend(
+            [
+                f"{details_key_prefix}_maintenance_items",
+                f"{details_key_prefix}_maintenance_items_editor",
+                f"{details_key_prefix}_maintenance_date",
+                f"{details_key_prefix}_maintenance_description",
+                f"{details_key_prefix}_maintenance_remarks",
+                f"{details_key_prefix}_maintenance_payment_status",
+                f"{details_key_prefix}_maintenance_person_in_charge",
+                f"{details_key_prefix}_maintenance_receipt",
+            ]
+        )
+    elif doc_type == "Other":
+        keys_to_clear.extend(
+            [
+                f"{details_key_prefix}_other_items",
+                f"{details_key_prefix}_other_items_editor",
+                f"{details_key_prefix}_other_description",
+            ]
+        )
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
+
+
 def _save_customer_document_upload(
     conn,
     *,
@@ -9977,7 +10129,7 @@ def _save_customer_document_upload(
             ),
         )
     elif doc_type == "Service":
-        items_clean, _ = normalize_simple_items(details.get("items") or [])
+        items_clean, total_amount = normalize_simple_items(details.get("items") or [])
         if items_clean:
             new_product_labels = format_simple_item_labels(items_clean)
         product_info = ", ".join(new_product_labels)
@@ -9996,7 +10148,7 @@ def _save_customer_document_upload(
             """
             INSERT INTO services (
                 customer_id, service_date, description, remarks, service_product_info,
-                status, payment_status, payment_receipt_path, created_by
+                status, payment_status, payment_receipt_path, bill_amount, created_by
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -10008,6 +10160,7 @@ def _save_customer_document_upload(
                 DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
+                total_amount if total_amount else None,
                 uploader_id,
             ),
         )
@@ -10020,7 +10173,7 @@ def _save_customer_document_upload(
             (service_id, stored_path, safe_original),
         )
     elif doc_type == "Maintenance":
-        items_clean, _ = normalize_simple_items(details.get("items") or [])
+        items_clean, total_amount = normalize_simple_items(details.get("items") or [])
         if items_clean:
             new_product_labels = format_simple_item_labels(items_clean)
         product_info = ", ".join(new_product_labels)
@@ -10039,7 +10192,7 @@ def _save_customer_document_upload(
             """
             INSERT INTO maintenance_records (
                 customer_id, maintenance_date, description, remarks, maintenance_product_info,
-                status, payment_status, payment_receipt_path, created_by
+                status, payment_status, payment_receipt_path, total_amount, created_by
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -10051,6 +10204,7 @@ def _save_customer_document_upload(
                 DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
+                total_amount if total_amount else None,
                 uploader_id,
             ),
         )
@@ -10218,28 +10372,28 @@ def render_customer_document_uploader(
         upload_cols = st.columns(2)
         with upload_cols[0]:
             st.markdown("**Delivery order (DO)**")
-            do_file = st.file_uploader(
-                "Delivery order upload",
-                type=None,
-                accept_multiple_files=False,
-                key=f"{key_prefix}_do_file",
-                help="Upload the delivery order PDF or image.",
-            )
-            _apply_ocr_autofill(
-                upload=do_file,
-                ocr_key_prefix=f"{key_prefix}_do_file",
-                doc_type="Delivery order",
-                details_key_prefix=f"{key_prefix}_do_details",
-            )
-            do_details = _render_doc_detail_inputs(
-                "Delivery order",
-                key_prefix=f"{key_prefix}_do_details",
-                defaults=customer_record,
-            )
-            submit_do = st.button(
-                "Save delivery order",
-                key=f"{key_prefix}_do_save",
-            )
+            with st.form(key=f"{key_prefix}_do_form", clear_on_submit=False):
+                do_file = st.file_uploader(
+                    "Delivery order upload",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=f"{key_prefix}_do_file",
+                    help="Upload the delivery order PDF or image.",
+                )
+                _apply_ocr_autofill(
+                    upload=do_file,
+                    ocr_key_prefix=f"{key_prefix}_do_file",
+                    doc_type="Delivery order",
+                    details_key_prefix=f"{key_prefix}_do_details",
+                )
+                do_details = _render_doc_detail_inputs(
+                    "Delivery order",
+                    key_prefix=f"{key_prefix}_do_details",
+                    defaults=customer_record,
+                )
+                submit_do = st.form_submit_button(
+                    "Save delivery order",
+                )
             if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
                 if do_file is None:
                     st.error("Select a delivery order document to upload.")
@@ -10254,7 +10408,11 @@ def render_customer_document_uploader(
                     )
                     if saved:
                         st.success("Delivery order uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_do_file",
+                            details_key_prefix=f"{key_prefix}_do_details",
+                            doc_type="Delivery order",
+                        )
 
         with upload_cols[1]:
             st.markdown("**Service / Maintenance**")
@@ -10365,28 +10523,28 @@ def render_operations_document_uploader(
         upload_cols = st.columns(2)
         with upload_cols[0]:
             st.markdown("**Delivery order (DO)**")
-            do_file = st.file_uploader(
-                "Delivery order upload",
-                type=None,
-                accept_multiple_files=False,
-                key=f"{key_prefix}_do_file",
-                help="Upload the delivery order PDF or image.",
-            )
-            _apply_ocr_autofill(
-                upload=do_file,
-                ocr_key_prefix=f"{key_prefix}_do_file",
-                doc_type="Delivery order",
-                details_key_prefix=f"{key_prefix}_do_details",
-            )
-            do_details = _render_doc_detail_inputs(
-                "Delivery order",
-                key_prefix=f"{key_prefix}_do_details",
-                defaults=customer_record,
-            )
-            submit_do = st.button(
-                "Save delivery order",
-                key=f"{key_prefix}_do_save",
-            )
+            with st.form(key=f"{key_prefix}_do_form", clear_on_submit=False):
+                do_file = st.file_uploader(
+                    "Delivery order upload",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=f"{key_prefix}_do_file",
+                    help="Upload the delivery order PDF or image.",
+                )
+                _apply_ocr_autofill(
+                    upload=do_file,
+                    ocr_key_prefix=f"{key_prefix}_do_file",
+                    doc_type="Delivery order",
+                    details_key_prefix=f"{key_prefix}_do_details",
+                )
+                do_details = _render_doc_detail_inputs(
+                    "Delivery order",
+                    key_prefix=f"{key_prefix}_do_details",
+                    defaults=customer_record,
+                )
+                submit_do = st.form_submit_button(
+                    "Save delivery order",
+                )
             if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
                 if do_file is None:
                     st.error("Select a delivery order document to upload.")
@@ -10401,32 +10559,31 @@ def render_operations_document_uploader(
                     )
                     if saved:
                         st.success("Delivery order uploaded.")
-                        _safe_rerun()
 
         with upload_cols[1]:
             st.markdown("**Work done**")
-            work_done_file = st.file_uploader(
-                "Work done upload",
-                type=None,
-                accept_multiple_files=False,
-                key=f"{key_prefix}_work_done_file",
-                help="Upload completed work slips or PDFs.",
-            )
-            _apply_ocr_autofill(
-                upload=work_done_file,
-                ocr_key_prefix=f"{key_prefix}_work_done_file",
-                doc_type="Work done",
-                details_key_prefix=f"{key_prefix}_work_done_details",
-            )
-            work_done_details = _render_doc_detail_inputs(
-                "Work done",
-                key_prefix=f"{key_prefix}_work_done_details",
-                defaults=customer_record,
-            )
-            submit_work_done = st.button(
-                "Save work done",
-                key=f"{key_prefix}_work_done_save",
-            )
+            with st.form(key=f"{key_prefix}_work_done_form", clear_on_submit=False):
+                work_done_file = st.file_uploader(
+                    "Work done upload",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=f"{key_prefix}_work_done_file",
+                    help="Upload completed work slips or PDFs.",
+                )
+                _apply_ocr_autofill(
+                    upload=work_done_file,
+                    ocr_key_prefix=f"{key_prefix}_work_done_file",
+                    doc_type="Work done",
+                    details_key_prefix=f"{key_prefix}_work_done_details",
+                )
+                work_done_details = _render_doc_detail_inputs(
+                    "Work done",
+                    key_prefix=f"{key_prefix}_work_done_details",
+                    defaults=customer_record,
+                )
+                submit_work_done = st.form_submit_button(
+                    "Save work done",
+                )
             if _guard_double_submit(f"{key_prefix}_work_done_save", submit_work_done):
                 if work_done_file is None:
                     st.error("Select a work done document to upload.")
@@ -10441,33 +10598,37 @@ def render_operations_document_uploader(
                     )
                     if saved:
                         st.success("Work done uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_work_done_file",
+                            details_key_prefix=f"{key_prefix}_work_done_details",
+                            doc_type="Work done",
+                        )
 
         upload_cols = st.columns(2)
         with upload_cols[0]:
             st.markdown("**Service**")
-            service_file = st.file_uploader(
-                "Service upload",
-                type=None,
-                accept_multiple_files=False,
-                key=f"{key_prefix}_service_file",
-                help="Upload service documents.",
-            )
-            _apply_ocr_autofill(
-                upload=service_file,
-                ocr_key_prefix=f"{key_prefix}_service_file",
-                doc_type="Service",
-                details_key_prefix=f"{key_prefix}_service_details",
-            )
-            service_details = _render_doc_detail_inputs(
-                "Service",
-                key_prefix=f"{key_prefix}_service_details",
-                defaults=customer_record,
-            )
-            submit_service = st.button(
-                "Save service",
-                key=f"{key_prefix}_service_save",
-            )
+            with st.form(key=f"{key_prefix}_service_form", clear_on_submit=False):
+                service_file = st.file_uploader(
+                    "Service upload",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=f"{key_prefix}_service_file",
+                    help="Upload service documents.",
+                )
+                _apply_ocr_autofill(
+                    upload=service_file,
+                    ocr_key_prefix=f"{key_prefix}_service_file",
+                    doc_type="Service",
+                    details_key_prefix=f"{key_prefix}_service_details",
+                )
+                service_details = _render_doc_detail_inputs(
+                    "Service",
+                    key_prefix=f"{key_prefix}_service_details",
+                    defaults=customer_record,
+                )
+                submit_service = st.form_submit_button(
+                    "Save service",
+                )
             if _guard_double_submit(f"{key_prefix}_service_save", submit_service):
                 if service_file is None:
                     st.error("Select a service document to upload.")
@@ -10482,32 +10643,36 @@ def render_operations_document_uploader(
                     )
                     if saved:
                         st.success("Service uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_service_file",
+                            details_key_prefix=f"{key_prefix}_service_details",
+                            doc_type="Service",
+                        )
 
         with upload_cols[1]:
             st.markdown("**Maintenance**")
-            maintenance_file = st.file_uploader(
-                "Maintenance upload",
-                type=None,
-                accept_multiple_files=False,
-                key=f"{key_prefix}_maintenance_file",
-                help="Upload maintenance documents.",
-            )
-            _apply_ocr_autofill(
-                upload=maintenance_file,
-                ocr_key_prefix=f"{key_prefix}_maintenance_file",
-                doc_type="Maintenance",
-                details_key_prefix=f"{key_prefix}_maintenance_details",
-            )
-            maintenance_details = _render_doc_detail_inputs(
-                "Maintenance",
-                key_prefix=f"{key_prefix}_maintenance_details",
-                defaults=customer_record,
-            )
-            submit_maintenance = st.button(
-                "Save maintenance",
-                key=f"{key_prefix}_maintenance_save",
-            )
+            with st.form(key=f"{key_prefix}_maintenance_form", clear_on_submit=False):
+                maintenance_file = st.file_uploader(
+                    "Maintenance upload",
+                    type=None,
+                    accept_multiple_files=False,
+                    key=f"{key_prefix}_maintenance_file",
+                    help="Upload maintenance documents.",
+                )
+                _apply_ocr_autofill(
+                    upload=maintenance_file,
+                    ocr_key_prefix=f"{key_prefix}_maintenance_file",
+                    doc_type="Maintenance",
+                    details_key_prefix=f"{key_prefix}_maintenance_details",
+                )
+                maintenance_details = _render_doc_detail_inputs(
+                    "Maintenance",
+                    key_prefix=f"{key_prefix}_maintenance_details",
+                    defaults=customer_record,
+                )
+                submit_maintenance = st.form_submit_button(
+                    "Save maintenance",
+                )
             if _guard_double_submit(f"{key_prefix}_maintenance_save", submit_maintenance):
                 if maintenance_file is None:
                     st.error("Select a maintenance document to upload.")
@@ -10522,25 +10687,29 @@ def render_operations_document_uploader(
                     )
                     if saved:
                         st.success("Maintenance uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_maintenance_file",
+                            details_key_prefix=f"{key_prefix}_maintenance_details",
+                            doc_type="Maintenance",
+                        )
 
         st.markdown("**Others**")
-        other_file = st.file_uploader(
-            "Other document upload",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_other_file",
-            help="Upload any other supporting document.",
-        )
-        other_details = _render_doc_detail_inputs(
-            "Other",
-            key_prefix=f"{key_prefix}_other_details",
-            defaults=customer_record,
-        )
-        submit_other = st.button(
-            "Save other upload",
-            key=f"{key_prefix}_other_save",
-        )
+        with st.form(key=f"{key_prefix}_other_form", clear_on_submit=False):
+            other_file = st.file_uploader(
+                "Other document upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_other_file",
+                help="Upload any other supporting document.",
+            )
+            other_details = _render_doc_detail_inputs(
+                "Other",
+                key_prefix=f"{key_prefix}_other_details",
+                defaults=customer_record,
+            )
+            submit_other = st.form_submit_button(
+                "Save other upload",
+            )
         if _guard_double_submit(f"{key_prefix}_other_save", submit_other):
             if other_file is None:
                 st.error("Select a document to upload.")
@@ -10555,7 +10724,11 @@ def render_operations_document_uploader(
                 )
                 if saved:
                     st.success("Other document uploaded.")
-                    _safe_rerun()
+                    _clear_operations_upload_state(
+                        file_key=f"{key_prefix}_other_file",
+                        details_key_prefix=f"{key_prefix}_other_details",
+                        doc_type="Other",
+                    )
 
     docs_df = df_query(
         conn,
@@ -11458,10 +11631,11 @@ def customers_page(conn):
                             status,
                             remarks,
                             maintenance_product_info,
+                            total_amount,
                             payment_status,
                             payment_receipt_path,
                             updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                         """,
                         (
                             maintenance_reference,
@@ -11473,6 +11647,7 @@ def customers_page(conn):
                             DEFAULT_SERVICE_STATUS,
                             remarks_val,
                             product_label,
+                            None,
                             maintenance_status_value,
                             maintenance_receipt_path,
                         ),
@@ -12094,12 +12269,12 @@ def _render_service_section(conn, *, show_heading: bool = True):
             )
         with cond_cols[1]:
             bill_amount_input = st.number_input(
-                "Bill amount",
+                "Service amount",
                 min_value=0.0,
                 step=100.0,
                 format="%.2f",
                 key="service_new_bill_amount",
-                help="Track how much the customer was billed for this service.",
+                help="Track the amount charged for this service.",
             )
         condition_notes = st.text_area(
             "Condition remarks",
@@ -12155,17 +12330,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                     key_prefix=f"service_new_docs_{idx}",
                     label=f"Service document {idx} OCR",
                 )
-        bill_file = st.file_uploader(
-            "Upload bill / invoice (PDF)",
-            type=["pdf"],
-            key="service_new_bill_file",
-            help="Store the supporting invoice for this service.",
-        )
-        _render_upload_ocr_preview(
-            bill_file,
-            key_prefix="service_new_bill_file",
-            label="Service bill OCR",
-        )
         submit = st.form_submit_button("Log service", type="primary")
 
     if submit:
@@ -12258,19 +12422,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                     SERVICE_DOCS_DIR,
                     f"service_{service_id}",
                 )
-                bill_saved = False
-                if bill_file is not None:
-                    stored_path = store_uploaded_pdf(
-                        bill_file,
-                        SERVICE_BILL_DIR,
-                        filename=f"service_{service_id}_bill.pdf",
-                    )
-                    if stored_path:
-                        conn.execute(
-                            "UPDATE services SET bill_document_path = ? WHERE service_id = ?",
-                            (stored_path, int(service_id)),
-                        )
-                        bill_saved = True
                 conn.commit()
                 service_label = do_labels.get(selected_do) if selected_do else None
                 if not service_label:
@@ -12297,9 +12448,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
                 if saved_docs:
                     message = f"{message} Attached {saved_docs} document(s)."
                 if bill_amount_value is not None:
-                    message = f"{message} Recorded bill amount {format_money(bill_amount_value)}."
-                if bill_saved:
-                    message = f"{message} Invoice uploaded."
+                    message = f"{message} Recorded service amount {format_money(bill_amount_value)}."
                 st.success(message)
                 _safe_rerun()
 
@@ -12320,7 +12469,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                s.condition_status,
                s.condition_remarks,
                s.bill_amount,
-               s.bill_document_path,
                 s.payment_receipt_path,
                s.updated_at,
                s.created_by,
@@ -12375,11 +12523,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
                 lambda x: clean_text(x) or "Not recorded"
             )
         if "bill_amount" in service_df.columns:
-            service_df["bill_amount_display"] = service_df["bill_amount"].apply(format_money)
-        if "bill_document_path" in service_df.columns:
-            service_df["bill_document_display"] = service_df["bill_document_path"].apply(
-                lambda x: "📄" if clean_text(x) else ""
-            )
+            service_df["service_amount_display"] = service_df["bill_amount"].apply(format_money)
         if "payment_receipt_path" in service_df.columns:
             service_df["payment_receipt_display"] = service_df["payment_receipt_path"].apply(
                 lambda x: "📎" if clean_text(x) else ""
@@ -12397,16 +12541,13 @@ def _render_service_section(conn, *, show_heading: bool = True):
                 "remarks": "Remarks",
                 "condition_status": "Condition",
                 "condition_remarks": "Condition notes",
-                "bill_amount_display": "Bill amount",
-                "bill_document_display": "Bill document",
+                "service_amount_display": "Service amount",
                 "payment_receipt_display": "Receipt",
                 "customer": "Customer",
                 "doc_count": "Documents",
             }
         )
-        display = display.drop(
-            columns=["bill_document_path", "payment_receipt_path"], errors="ignore"
-        )
+        display = display.drop(columns=["payment_receipt_path"], errors="ignore")
         st.markdown("### Service history")
         st.dataframe(
             display.drop(columns=["updated_at", "service_id"], errors="ignore"),
@@ -12493,7 +12634,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
             bill_amount_default = 0.0
         with condition_cols[1]:
             bill_amount_edit = st.number_input(
-                "Bill amount",
+                "Service amount",
                 value=float(bill_amount_default),
                 min_value=0.0,
                 step=100.0,
@@ -12505,30 +12646,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
             value=clean_text(selected_record.get("condition_remarks")) or "",
             key=f"service_edit_condition_notes_{selected_service_id}",
         )
-        existing_bill_path = clean_text(selected_record.get("bill_document_path"))
-        resolved_bill_path = resolve_upload_path(existing_bill_path)
-        bill_col1, bill_col2 = st.columns([1, 1])
-        with bill_col1:
-            bill_file_edit = st.file_uploader(
-                "Replace bill / invoice (PDF)",
-                type=["pdf"],
-                key=f"service_edit_bill_upload_{selected_service_id}",
-            )
-        with bill_col2:
-            clear_bill = st.checkbox(
-                "Remove existing bill",
-                value=False,
-                key=f"service_edit_bill_clear_{selected_service_id}",
-            )
-        if resolved_bill_path and resolved_bill_path.exists():
-            st.download_button(
-                "Download current bill",
-                data=resolved_bill_path.read_bytes(),
-                file_name=resolved_bill_path.name,
-                key=f"service_bill_download_{selected_service_id}",
-            )
-        elif existing_bill_path:
-            st.caption("Bill file not found. Upload a fresh copy to replace it.")
         receipt_col1, receipt_col2 = st.columns([1, 1])
         existing_receipt_path = clean_text(selected_record.get("payment_receipt_path"))
         resolved_receipt = resolve_upload_path(existing_receipt_path)
@@ -12582,37 +12699,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                         bill_amount_update = round(float(bill_amount_edit), 2)
                 except Exception:
                     bill_amount_update = None
-                current_bill_path = clean_text(selected_record.get("bill_document_path"))
-                bill_path_value = current_bill_path
-                replaced_bill = False
-                removed_bill = False
-                if bill_file_edit is not None:
-                    stored_path = store_uploaded_pdf(
-                        bill_file_edit,
-                        SERVICE_BILL_DIR,
-                        filename=f"service_{selected_service_id}_bill.pdf",
-                    )
-                    if stored_path:
-                        bill_path_value = stored_path
-                        replaced_bill = True
-                        if current_bill_path:
-                            old_path = resolve_upload_path(current_bill_path)
-                            if old_path and old_path.exists():
-                                new_path = resolve_upload_path(stored_path)
-                                if not new_path or new_path != old_path:
-                                    try:
-                                        old_path.unlink()
-                                    except Exception:
-                                        pass
-                elif clear_bill and current_bill_path:
-                    old_path = resolve_upload_path(current_bill_path)
-                    if old_path and old_path.exists():
-                        try:
-                            old_path.unlink()
-                        except Exception:
-                            pass
-                    bill_path_value = None
-                    removed_bill = True
                 receipt_path_value = clean_text(selected_record.get("payment_receipt_path"))
                 replaced_receipt = False
                 cleared_receipt = False
@@ -12643,7 +12729,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                         condition_status = ?,
                         condition_remarks = ?,
                         bill_amount = ?,
-                        bill_document_path = ?,
                         payment_receipt_path = COALESCE(?, payment_receipt_path),
                         updated_at = datetime('now')
                     WHERE service_id = ?
@@ -12657,7 +12742,6 @@ def _render_service_section(conn, *, show_heading: bool = True):
                         condition_update_value,
                         condition_notes_update,
                         bill_amount_update,
-                        bill_path_value,
                         receipt_path_value,
                         int(selected_service_id),
                     ),
@@ -12677,11 +12761,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
                 )
                 message_bits = ["Service record updated."]
                 if bill_amount_update is not None:
-                    message_bits.append(f"Bill amount {format_money(bill_amount_update)}")
-                if replaced_bill:
-                    message_bits.append("Invoice replaced")
-                elif removed_bill:
-                    message_bits.append("Invoice removed")
+                    message_bits.append(f"Service amount {format_money(bill_amount_update)}")
                 if replaced_receipt:
                     message_bits.append("Receipt uploaded")
                 elif cleared_receipt:
@@ -15099,6 +15179,14 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             )
         description = st.text_area("Maintenance description")
         remarks = st.text_area("Remarks / updates")
+        maintenance_amount_input = st.number_input(
+            "Maintenance amount",
+            min_value=0.0,
+            step=100.0,
+            format="%.2f",
+            key="maintenance_new_amount",
+            help="Track the amount charged for this maintenance.",
+        )
         st.markdown("**Products sold during maintenance**")
         maintenance_rows = st.session_state.get(
             "maintenance_product_rows",
@@ -15184,6 +15272,12 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                 if maintenance_product_labels
                 else None
             )
+            maintenance_amount_value = None
+            try:
+                if maintenance_amount_input is not None and float(maintenance_amount_input) > 0:
+                    maintenance_amount_value = round(float(maintenance_amount_input), 2)
+            except Exception:
+                maintenance_amount_value = None
             cur.execute(
                 """
                 INSERT INTO maintenance_records (
@@ -15196,9 +15290,10 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                     status,
                     remarks,
                     maintenance_product_info,
+                    total_amount,
                     updated_at,
                     created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     selected_do,
@@ -15210,6 +15305,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                     status_value,
                     clean_text(remarks),
                     maintenance_product_label,
+                    maintenance_amount_value,
                     datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                     current_user_id(),
                 ),
@@ -15268,6 +15364,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                m.description,
                m.status,
                m.remarks,
+               m.total_amount,
                m.payment_receipt_path,
                m.updated_at,
                m.created_by,
@@ -15320,6 +15417,10 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         maintenance_df.loc[maintenance_df["Last update"].isna(), "Last update"] = None
         if "status" in maintenance_df.columns:
             maintenance_df["status"] = maintenance_df["status"].apply(lambda x: clean_text(x) or DEFAULT_SERVICE_STATUS)
+        if "total_amount" in maintenance_df.columns:
+            maintenance_df["maintenance_amount_display"] = maintenance_df["total_amount"].apply(
+                format_money
+            )
         if "payment_receipt_path" in maintenance_df.columns:
             maintenance_df["payment_receipt_display"] = maintenance_df[
                 "payment_receipt_path"
@@ -15335,6 +15436,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                 "description": "Description",
                 "status": "Status",
                 "remarks": "Remarks",
+                "maintenance_amount_display": "Maintenance amount",
                 "payment_receipt_display": "Receipt",
                 "customer": "Customer",
                 "doc_count": "Documents",
@@ -15409,6 +15511,21 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             value=clean_text(selected_record.get("remarks")) or "",
             key=f"maintenance_edit_{selected_maintenance_id}",
         )
+        existing_amount = selected_record.get("total_amount")
+        try:
+            maintenance_amount_default = (
+                float(existing_amount) if existing_amount is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            maintenance_amount_default = 0.0
+        maintenance_amount_edit = st.number_input(
+            "Maintenance amount",
+            value=float(maintenance_amount_default),
+            min_value=0.0,
+            step=100.0,
+            format="%.2f",
+            key=f"maintenance_edit_amount_{selected_maintenance_id}",
+        )
         existing_receipt_path = clean_text(selected_record.get("payment_receipt_path"))
         resolved_receipt = resolve_upload_path(existing_receipt_path)
         receipt_cols = st.columns([1, 1])
@@ -15457,6 +15574,10 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                 st.error("Select a start date for this maintenance entry.")
                 valid_update = False
             if valid_update:
+                try:
+                    maintenance_amount_update = round(float(maintenance_amount_edit or 0.0), 2)
+                except Exception:
+                    maintenance_amount_update = 0.0
                 receipt_path_value = existing_receipt_path
                 replaced_receipt = False
                 cleared_receipt = False
@@ -15484,6 +15605,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                         maintenance_date = ?,
                         maintenance_start_date = ?,
                         maintenance_end_date = ?,
+                        total_amount = ?,
                         payment_receipt_path = COALESCE(?, payment_receipt_path),
                         updated_at = datetime('now')
                     WHERE maintenance_id = ?
@@ -15494,6 +15616,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                         maintenance_date_str,
                         maintenance_start_str,
                         maintenance_end_str,
+                        maintenance_amount_update,
                         receipt_path_value,
                         int(selected_maintenance_id),
                     ),
@@ -15513,6 +15636,8 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                     entity_id=int(selected_maintenance_id),
                 )
                 message_bits = ["Maintenance record updated."]
+                if maintenance_amount_update:
+                    message_bits.append(f"Maintenance amount {format_money(maintenance_amount_update)}")
                 if replaced_receipt:
                     message_bits.append("Receipt uploaded")
                 elif cleared_receipt:
@@ -18684,8 +18809,9 @@ def _import_clean6(conn, df, tag="Import"):
             cur.execute(
                 """
                 INSERT INTO maintenance_records (
-                    do_number, customer_id, maintenance_date, description, remarks, maintenance_product_info, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    do_number, customer_id, maintenance_date, description, remarks, maintenance_product_info,
+                    total_amount, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     maintenance_code,
@@ -18694,6 +18820,7 @@ def _import_clean6(conn, df, tag="Import"):
                     product_label or remarks_val,
                     remarks_val,
                     product_label,
+                    None,
                     created_by,
                 ),
             )
