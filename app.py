@@ -7208,9 +7208,65 @@ def dashboard(conn):
             allowed_customers,
             record_types={"delivery_order", "work_done"},
         )
-        if staff_sales_df.empty:
-            st.caption("No personal delivery order sales have been logged yet.")
-        else:
+        staff_service_df = df_query(
+            conn,
+            """
+            SELECT s.service_id,
+                   s.do_number,
+                   s.customer_id,
+                   s.created_by,
+                   s.service_product_info,
+                   s.description,
+                   s.bill_amount,
+                   s.payment_status,
+                   s.updated_at,
+                   COALESCE(c.company_name, c.name, '(customer)') AS customer
+            FROM services s
+            LEFT JOIN customers c ON c.customer_id = s.customer_id
+            ORDER BY datetime(s.updated_at) DESC, s.service_id DESC
+            LIMIT 30
+            """,
+        )
+        staff_maintenance_df = df_query(
+            conn,
+            """
+            SELECT m.maintenance_id,
+                   m.do_number,
+                   m.customer_id,
+                   m.created_by,
+                   m.maintenance_product_info,
+                   m.description,
+                   m.total_amount,
+                   m.payment_status,
+                   m.updated_at,
+                   COALESCE(c.company_name, c.name, '(customer)') AS customer
+            FROM maintenance_records m
+            LEFT JOIN customers c ON c.customer_id = m.customer_id
+            ORDER BY datetime(m.updated_at) DESC, m.maintenance_id DESC
+            LIMIT 30
+            """,
+        )
+        if allowed_customers is not None:
+            staff_service_df = staff_service_df[
+                staff_service_df["customer_id"].apply(
+                    lambda value: pd.notna(value) and int(value) in allowed_customers
+                )
+            ]
+            staff_maintenance_df = staff_maintenance_df[
+                staff_maintenance_df["customer_id"].apply(
+                    lambda value: pd.notna(value) and int(value) in allowed_customers
+                )
+            ]
+
+        def _format_payment_label(value: Optional[str]) -> str:
+            cleaned = clean_text(value)
+            if not cleaned:
+                return "Pending"
+            return cleaned.replace("_", " ").title()
+
+        sales_frames: list[pd.DataFrame] = []
+        if not staff_sales_df.empty:
+            staff_sales_df["Reference"] = staff_sales_df["do_number"]
             staff_sales_df["Products"] = staff_sales_df.apply(
                 lambda row: dedupe_join(
                     format_simple_item_labels(parse_delivery_items_payload(row.get("items_payload")))
@@ -7223,17 +7279,89 @@ def dashboard(conn):
                 lambda value: format_time_ago(value) or format_period_range(value, value)
             )
             staff_sales_df["Total (BDT)"] = staff_sales_df["total_amount"].apply(format_sales_amount)
-            staff_sales_df["Status"] = staff_sales_df["status"].apply(
-                lambda value: clean_text(value).title() if value else "Pending"
+            staff_sales_df["Status"] = staff_sales_df["status"].apply(_format_payment_label)
+            staff_sales_df["sort_date"] = pd.to_datetime(
+                staff_sales_df["created_at"], errors="coerce"
+            )
+            sales_frames.append(
+                staff_sales_df[
+                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                ].rename(columns={"customer": "Customer"})
+            )
+
+        if not staff_service_df.empty:
+            staff_service_df["Reference"] = staff_service_df.apply(
+                lambda row: clean_text(row.get("do_number"))
+                or f"Service #{int(row.get('service_id'))}"
+                if pd.notna(row.get("service_id"))
+                else "Service",
+                axis=1,
+            )
+            staff_service_df["Products"] = staff_service_df.apply(
+                lambda row: clean_text(row.get("service_product_info"))
+                or clean_text(row.get("description"))
+                or "—",
+                axis=1,
+            )
+            staff_service_df["When"] = staff_service_df["updated_at"].apply(
+                lambda value: format_time_ago(value) or format_period_range(value, value)
+            )
+            staff_service_df["Total (BDT)"] = staff_service_df["bill_amount"].apply(format_sales_amount)
+            staff_service_df["Status"] = staff_service_df["payment_status"].apply(_format_payment_label)
+            staff_service_df["sort_date"] = pd.to_datetime(
+                staff_service_df["updated_at"], errors="coerce"
+            )
+            sales_frames.append(
+                staff_service_df[
+                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                ].rename(columns={"customer": "Customer"})
+            )
+
+        if not staff_maintenance_df.empty:
+            staff_maintenance_df["Reference"] = staff_maintenance_df.apply(
+                lambda row: clean_text(row.get("do_number"))
+                or f"Maintenance #{int(row.get('maintenance_id'))}"
+                if pd.notna(row.get("maintenance_id"))
+                else "Maintenance",
+                axis=1,
+            )
+            staff_maintenance_df["Products"] = staff_maintenance_df.apply(
+                lambda row: clean_text(row.get("maintenance_product_info"))
+                or clean_text(row.get("description"))
+                or "—",
+                axis=1,
+            )
+            staff_maintenance_df["When"] = staff_maintenance_df["updated_at"].apply(
+                lambda value: format_time_ago(value) or format_period_range(value, value)
+            )
+            staff_maintenance_df["Total (BDT)"] = staff_maintenance_df["total_amount"].apply(
+                format_sales_amount
+            )
+            staff_maintenance_df["Status"] = staff_maintenance_df["payment_status"].apply(
+                _format_payment_label
+            )
+            staff_maintenance_df["sort_date"] = pd.to_datetime(
+                staff_maintenance_df["updated_at"], errors="coerce"
+            )
+            sales_frames.append(
+                staff_maintenance_df[
+                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                ].rename(columns={"customer": "Customer"})
+            )
+
+        if not sales_frames:
+            st.caption("No personal sales have been logged yet.")
+        else:
+            sales_snapshot = (
+                pd.concat(sales_frames, ignore_index=True)
+                .sort_values(by="sort_date", ascending=False)
+                .head(30)
             )
             st.dataframe(
-                staff_sales_df[
-                    ["do_number", "customer", "Products", "Total (BDT)", "Status", "When"]
+                sales_snapshot[
+                    ["Reference", "Customer", "Products", "Total (BDT)", "Status", "When"]
                 ].rename(
-                    columns={
-                        "do_number": "DO/Work No.",
-                        "customer": "Customer",
-                    }
+                    columns={"Reference": "DO/Work No./Service/Maintenance"}
                 ),
                 use_container_width=True,
                 hide_index=True,
@@ -10378,7 +10506,11 @@ def render_customer_document_uploader(
                     )
                     if saved:
                         st.success("Work done uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_work_done_file",
+                            details_key_prefix=f"{key_prefix}_work_done_details",
+                            doc_type="Work done",
+                        )
 
         upload_cols = st.columns(2)
         with upload_cols[0]:
@@ -10419,6 +10551,11 @@ def render_customer_document_uploader(
                     )
                     if saved:
                         st.success("Delivery order uploaded.")
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_do_file",
+                            details_key_prefix=f"{key_prefix}_do_details",
+                            doc_type="Delivery order",
+                        )
                         _clear_operations_upload_state(
                             file_key=f"{key_prefix}_do_file",
                             details_key_prefix=f"{key_prefix}_do_details",
@@ -10468,7 +10605,11 @@ def render_customer_document_uploader(
                     )
                     if saved:
                         st.success(f"{service_choice} uploaded.")
-                        _safe_rerun()
+                        _clear_operations_upload_state(
+                            file_key=f"{key_prefix}_service_file",
+                            details_key_prefix=f"{key_prefix}_service_details",
+                            doc_type=service_choice,
+                        )
 
     docs_df = df_query(
         conn,
