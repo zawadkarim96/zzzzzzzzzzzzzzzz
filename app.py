@@ -152,20 +152,12 @@ SERVICE_REPORT_FIELDS = OrderedDict(
         ),
         ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
         (
-            "status",
-            {
-                "label": "Status",
-                "type": "text",
-                "help": "Current job status (e.g. Completed, Pending).",
-            },
-        ),
-        (
             "progress_status",
             {
                 "label": "Progress",
                 "type": "select",
-                "options": ["Pending", "Done"],
-                "help": "Mark when this row is completed.",
+                "options": ["Ongoing", "Done", "Rejected"],
+                "help": "Defaults to Ongoing for new uploads. Choose Done or Rejected when updating.",
             },
         ),
         (
@@ -221,15 +213,6 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
         ("product_detail", {"label": "Product Detail", "type": "text"}),
         ("qty", {"label": "Qty", "type": "number", "step": 1.0}),
         (
-            "status",
-            {
-                "label": "Status",
-                "type": "select",
-                "options": ["Pending", "Paid"],
-                "help": "Track whether the follow-up is paid or still pending.",
-            },
-        ),
-        (
             "notes",
             {
                 "label": "Remarks",
@@ -251,8 +234,8 @@ FOLLOW_UP_REPORT_FIELDS = OrderedDict(
             {
                 "label": "Progress",
                 "type": "select",
-                "options": ["Pending", "Done"],
-                "help": "Mark when this follow-up is completed.",
+                "options": ["Ongoing", "Done", "Rejected"],
+                "help": "Defaults to Ongoing for new uploads. Choose Done or Rejected when updating.",
             },
         ),
         (
@@ -298,7 +281,7 @@ REPORT_TEMPLATE_SUMMARY_FIELDS = {
     },
     "follow_up": {
         "tasks": "notes",
-        "remarks": "status",
+        "remarks": "notes",
         "research": "product_detail",
     },
 }
@@ -339,7 +322,9 @@ def _get_report_display_columns(template_key: Optional[str] = None) -> list[str]
 def _default_report_grid_row(template_key: Optional[str] = None) -> dict[str, object]:
     row: dict[str, object] = {}
     for key, config in _get_report_grid_fields(template_key).items():
-        if config["type"] == "number":
+        if key == "progress_status":
+            row[key] = "Ongoing"
+        elif config["type"] == "number":
             row[key] = None
         else:
             row[key] = ""
@@ -10372,200 +10357,201 @@ def render_operations_document_uploader(
     )
     customer_record = customer_seed.iloc[0].to_dict() if not customer_seed.empty else {}
 
-    upload_cols = st.columns(2)
-    with upload_cols[0]:
-        st.markdown("**Delivery order (DO)**")
-        do_file = st.file_uploader(
-            "Delivery order upload",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_do_file",
-            help="Upload the delivery order PDF or image.",
-        )
-        _apply_ocr_autofill(
-            upload=do_file,
-            ocr_key_prefix=f"{key_prefix}_do_file",
-            doc_type="Delivery order",
-            details_key_prefix=f"{key_prefix}_do_details",
-        )
-        do_details = _render_doc_detail_inputs(
-            "Delivery order",
-            key_prefix=f"{key_prefix}_do_details",
-            defaults=customer_record,
-        )
-        submit_do = st.button(
-            "Save delivery order",
-            key=f"{key_prefix}_do_save",
-        )
-        if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
-            if do_file is None:
-                st.error("Select a delivery order document to upload.")
-            else:
-                saved = _save_customer_document_upload(
-                    conn,
-                    customer_id=int(selected_customer),
-                    customer_record=customer_record,
-                    doc_type="Delivery order",
-                    upload_file=do_file,
-                    details=do_details,
-                )
-                if saved:
-                    st.success("Delivery order uploaded.")
-                    _safe_rerun()
-
-    with upload_cols[1]:
-        st.markdown("**Work done**")
-        work_done_file = st.file_uploader(
-            "Work done upload",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_work_done_file",
-            help="Upload completed work slips or PDFs.",
-        )
-        _apply_ocr_autofill(
-            upload=work_done_file,
-            ocr_key_prefix=f"{key_prefix}_work_done_file",
-            doc_type="Work done",
-            details_key_prefix=f"{key_prefix}_work_done_details",
-        )
-        work_done_details = _render_doc_detail_inputs(
-            "Work done",
-            key_prefix=f"{key_prefix}_work_done_details",
-            defaults=customer_record,
-        )
-        submit_work_done = st.button(
-            "Save work done",
-            key=f"{key_prefix}_work_done_save",
-        )
-        if _guard_double_submit(f"{key_prefix}_work_done_save", submit_work_done):
-            if work_done_file is None:
-                st.error("Select a work done document to upload.")
-            else:
-                saved = _save_customer_document_upload(
-                    conn,
-                    customer_id=int(selected_customer),
-                    customer_record=customer_record,
-                    doc_type="Work done",
-                    upload_file=work_done_file,
-                    details=work_done_details,
-                )
-                if saved:
-                    st.success("Work done uploaded.")
-                    _safe_rerun()
-
-    upload_cols = st.columns(2)
-    with upload_cols[0]:
-        st.markdown("**Service**")
-        service_file = st.file_uploader(
-            "Service upload",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_service_file",
-            help="Upload service documents.",
-        )
-        _apply_ocr_autofill(
-            upload=service_file,
-            ocr_key_prefix=f"{key_prefix}_service_file",
-            doc_type="Service",
-            details_key_prefix=f"{key_prefix}_service_details",
-        )
-        service_details = _render_doc_detail_inputs(
-            "Service",
-            key_prefix=f"{key_prefix}_service_details",
-            defaults=customer_record,
-        )
-        submit_service = st.button(
-            "Save service",
-            key=f"{key_prefix}_service_save",
-        )
-        if _guard_double_submit(f"{key_prefix}_service_save", submit_service):
-            if service_file is None:
-                st.error("Select a service document to upload.")
-            else:
-                saved = _save_customer_document_upload(
-                    conn,
-                    customer_id=int(selected_customer),
-                    customer_record=customer_record,
-                    doc_type="Service",
-                    upload_file=service_file,
-                    details=service_details,
-                )
-                if saved:
-                    st.success("Service uploaded.")
-                    _safe_rerun()
-
-    with upload_cols[1]:
-        st.markdown("**Maintenance**")
-        maintenance_file = st.file_uploader(
-            "Maintenance upload",
-            type=None,
-            accept_multiple_files=False,
-            key=f"{key_prefix}_maintenance_file",
-            help="Upload maintenance documents.",
-        )
-        _apply_ocr_autofill(
-            upload=maintenance_file,
-            ocr_key_prefix=f"{key_prefix}_maintenance_file",
-            doc_type="Maintenance",
-            details_key_prefix=f"{key_prefix}_maintenance_details",
-        )
-        maintenance_details = _render_doc_detail_inputs(
-            "Maintenance",
-            key_prefix=f"{key_prefix}_maintenance_details",
-            defaults=customer_record,
-        )
-        submit_maintenance = st.button(
-            "Save maintenance",
-            key=f"{key_prefix}_maintenance_save",
-        )
-        if _guard_double_submit(f"{key_prefix}_maintenance_save", submit_maintenance):
-            if maintenance_file is None:
-                st.error("Select a maintenance document to upload.")
-            else:
-                saved = _save_customer_document_upload(
-                    conn,
-                    customer_id=int(selected_customer),
-                    customer_record=customer_record,
-                    doc_type="Maintenance",
-                    upload_file=maintenance_file,
-                    details=maintenance_details,
-                )
-                if saved:
-                    st.success("Maintenance uploaded.")
-                    _safe_rerun()
-
-    st.markdown("**Others**")
-    other_file = st.file_uploader(
-        "Other document upload",
-        type=None,
-        accept_multiple_files=False,
-        key=f"{key_prefix}_other_file",
-        help="Upload any other supporting document.",
-    )
-    other_details = _render_doc_detail_inputs(
-        "Other",
-        key_prefix=f"{key_prefix}_other_details",
-        defaults=customer_record,
-    )
-    submit_other = st.button(
-        "Save other upload",
-        key=f"{key_prefix}_other_save",
-    )
-    if _guard_double_submit(f"{key_prefix}_other_save", submit_other):
-        if other_file is None:
-            st.error("Select a document to upload.")
-        else:
-            saved = _save_customer_document_upload(
-                conn,
-                customer_id=int(selected_customer),
-                customer_record=customer_record,
-                doc_type="Other",
-                upload_file=other_file,
-                details=other_details,
+    with st.expander("Operations uploads", expanded=False):
+        upload_cols = st.columns(2)
+        with upload_cols[0]:
+            st.markdown("**Delivery order (DO)**")
+            do_file = st.file_uploader(
+                "Delivery order upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_do_file",
+                help="Upload the delivery order PDF or image.",
             )
-            if saved:
-                st.success("Other document uploaded.")
-                _safe_rerun()
+            _apply_ocr_autofill(
+                upload=do_file,
+                ocr_key_prefix=f"{key_prefix}_do_file",
+                doc_type="Delivery order",
+                details_key_prefix=f"{key_prefix}_do_details",
+            )
+            do_details = _render_doc_detail_inputs(
+                "Delivery order",
+                key_prefix=f"{key_prefix}_do_details",
+                defaults=customer_record,
+            )
+            submit_do = st.button(
+                "Save delivery order",
+                key=f"{key_prefix}_do_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_do_save", submit_do):
+                if do_file is None:
+                    st.error("Select a delivery order document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Delivery order",
+                        upload_file=do_file,
+                        details=do_details,
+                    )
+                    if saved:
+                        st.success("Delivery order uploaded.")
+                        _safe_rerun()
+
+        with upload_cols[1]:
+            st.markdown("**Work done**")
+            work_done_file = st.file_uploader(
+                "Work done upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_work_done_file",
+                help="Upload completed work slips or PDFs.",
+            )
+            _apply_ocr_autofill(
+                upload=work_done_file,
+                ocr_key_prefix=f"{key_prefix}_work_done_file",
+                doc_type="Work done",
+                details_key_prefix=f"{key_prefix}_work_done_details",
+            )
+            work_done_details = _render_doc_detail_inputs(
+                "Work done",
+                key_prefix=f"{key_prefix}_work_done_details",
+                defaults=customer_record,
+            )
+            submit_work_done = st.button(
+                "Save work done",
+                key=f"{key_prefix}_work_done_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_work_done_save", submit_work_done):
+                if work_done_file is None:
+                    st.error("Select a work done document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Work done",
+                        upload_file=work_done_file,
+                        details=work_done_details,
+                    )
+                    if saved:
+                        st.success("Work done uploaded.")
+                        _safe_rerun()
+
+        upload_cols = st.columns(2)
+        with upload_cols[0]:
+            st.markdown("**Service**")
+            service_file = st.file_uploader(
+                "Service upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_service_file",
+                help="Upload service documents.",
+            )
+            _apply_ocr_autofill(
+                upload=service_file,
+                ocr_key_prefix=f"{key_prefix}_service_file",
+                doc_type="Service",
+                details_key_prefix=f"{key_prefix}_service_details",
+            )
+            service_details = _render_doc_detail_inputs(
+                "Service",
+                key_prefix=f"{key_prefix}_service_details",
+                defaults=customer_record,
+            )
+            submit_service = st.button(
+                "Save service",
+                key=f"{key_prefix}_service_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_service_save", submit_service):
+                if service_file is None:
+                    st.error("Select a service document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Service",
+                        upload_file=service_file,
+                        details=service_details,
+                    )
+                    if saved:
+                        st.success("Service uploaded.")
+                        _safe_rerun()
+
+        with upload_cols[1]:
+            st.markdown("**Maintenance**")
+            maintenance_file = st.file_uploader(
+                "Maintenance upload",
+                type=None,
+                accept_multiple_files=False,
+                key=f"{key_prefix}_maintenance_file",
+                help="Upload maintenance documents.",
+            )
+            _apply_ocr_autofill(
+                upload=maintenance_file,
+                ocr_key_prefix=f"{key_prefix}_maintenance_file",
+                doc_type="Maintenance",
+                details_key_prefix=f"{key_prefix}_maintenance_details",
+            )
+            maintenance_details = _render_doc_detail_inputs(
+                "Maintenance",
+                key_prefix=f"{key_prefix}_maintenance_details",
+                defaults=customer_record,
+            )
+            submit_maintenance = st.button(
+                "Save maintenance",
+                key=f"{key_prefix}_maintenance_save",
+            )
+            if _guard_double_submit(f"{key_prefix}_maintenance_save", submit_maintenance):
+                if maintenance_file is None:
+                    st.error("Select a maintenance document to upload.")
+                else:
+                    saved = _save_customer_document_upload(
+                        conn,
+                        customer_id=int(selected_customer),
+                        customer_record=customer_record,
+                        doc_type="Maintenance",
+                        upload_file=maintenance_file,
+                        details=maintenance_details,
+                    )
+                    if saved:
+                        st.success("Maintenance uploaded.")
+                        _safe_rerun()
+
+        st.markdown("**Others**")
+        other_file = st.file_uploader(
+            "Other document upload",
+            type=None,
+            accept_multiple_files=False,
+            key=f"{key_prefix}_other_file",
+            help="Upload any other supporting document.",
+        )
+        other_details = _render_doc_detail_inputs(
+            "Other",
+            key_prefix=f"{key_prefix}_other_details",
+            defaults=customer_record,
+        )
+        submit_other = st.button(
+            "Save other upload",
+            key=f"{key_prefix}_other_save",
+        )
+        if _guard_double_submit(f"{key_prefix}_other_save", submit_other):
+            if other_file is None:
+                st.error("Select a document to upload.")
+            else:
+                saved = _save_customer_document_upload(
+                    conn,
+                    customer_id=int(selected_customer),
+                    customer_record=customer_record,
+                    doc_type="Other",
+                    upload_file=other_file,
+                    details=other_details,
+                )
+                if saved:
+                    st.success("Other document uploaded.")
+                    _safe_rerun()
 
     docs_df = df_query(
         conn,
@@ -19655,6 +19641,7 @@ def reports_page(conn):
         st.session_state.pop("report_grid_import_rows", None)
         st.session_state.pop("report_grid_import_payload", None)
         st.session_state.pop("report_grid_mapping_choices", None)
+        st.session_state.pop("report_grid_mapping_saved", None)
 
     editing_record: Optional[dict] = None
     if selected_report_id is not None and not selectable_reports.empty:
@@ -19734,6 +19721,7 @@ def reports_page(conn):
         st.session_state.pop("report_grid_import_rows", None)
         st.session_state.pop("report_grid_import_payload", None)
         st.session_state.pop("report_grid_mapping_choices", None)
+        st.session_state.pop("report_grid_mapping_saved", None)
         st.session_state.pop("report_grid_editor_state", None)
     default_period_key = "daily"
     if editing_record:
@@ -19793,6 +19781,7 @@ def reports_page(conn):
         }
         st.session_state["report_grid_import_payload"] = import_payload
         st.session_state.pop("report_grid_mapping_choices", None)
+        st.session_state["report_grid_mapping_saved"] = False
 
     if import_payload:
         uploaded_df = _load_report_grid_dataframe(
@@ -19819,28 +19808,31 @@ def reports_page(conn):
                         icon="⚠️",
                     )
             mapping_seed = st.session_state.get("report_grid_mapping_choices", {})
+            mapping_saved = st.session_state.get("report_grid_mapping_saved", False)
             map_options = ["(Do not import)"] + list(uploaded_df.columns)
-            with st.form("report_grid_import_mapper"):
-                st.caption(
-                    "Align columns from the uploaded file to the report grid fields. Skipped columns will be ignored."
-                )
-                selected_mapping: dict[str, str] = {}
-                for key, config in _get_report_grid_fields(template_key).items():
-                    default_choice = mapping_seed.get(key) or suggestions.get(key)
-                    if default_choice not in map_options:
-                        default_choice = "(Do not import)"
-                    choice = st.selectbox(
-                        config["label"],
-                        options=map_options,
-                        index=map_options.index(default_choice)
-                        if default_choice in map_options
-                        else 0,
-                        key=f"report_map_{key}",
-                        help=f"Select the column that represents '{config['label']}'.",
+            selected_mapping: dict[str, str] = {}
+            load_clicked = False
+            if not mapping_saved:
+                with st.form("report_grid_import_mapper"):
+                    st.caption(
+                        "Align columns from the uploaded file to the report grid fields. Skipped columns will be ignored."
                     )
-                    if choice != "(Do not import)":
-                        selected_mapping[choice] = key
-                load_clicked = st.form_submit_button("Load mapped rows into grid")
+                    for key, config in _get_report_grid_fields(template_key).items():
+                        default_choice = mapping_seed.get(key) or suggestions.get(key)
+                        if default_choice not in map_options:
+                            default_choice = "(Do not import)"
+                        choice = st.selectbox(
+                            config["label"],
+                            options=map_options,
+                            index=map_options.index(default_choice)
+                            if default_choice in map_options
+                            else 0,
+                            key=f"report_map_{key}",
+                            help=f"Select the column that represents '{config['label']}'.",
+                        )
+                        if choice != "(Do not import)":
+                            selected_mapping[choice] = key
+                    load_clicked = st.form_submit_button("Load mapped rows into grid")
 
             if load_clicked:
                 st.session_state["report_grid_mapping_choices"] = {
@@ -19855,6 +19847,7 @@ def reports_page(conn):
                     st.success(
                         f"Loaded {len(imported_rows)} row(s) using the selected mapping."
                     )
+                    st.session_state["report_grid_mapping_saved"] = True
                 else:
                     st.warning(
                         "No rows were imported with that mapping. Please review the selections and try again.",
@@ -20471,13 +20464,16 @@ def reports_page(conn):
                 .str.strip()
                 .str.lower()
             )
+            progress_series = progress_series.replace({"pending": "ongoing"})
             total_rows = int(progress_series.shape[0])
             done_rows = int((progress_series == "done").sum())
-            pending_rows = max(total_rows - done_rows, 0)
-            progress_cols = st.columns(3)
+            rejected_rows = int((progress_series == "rejected").sum())
+            ongoing_rows = int((progress_series == "ongoing").sum())
+            progress_cols = st.columns(4)
             progress_cols[0].metric("Report rows", total_rows)
-            progress_cols[1].metric("Done", done_rows)
-            progress_cols[2].metric("Pending", pending_rows)
+            progress_cols[1].metric("Ongoing", ongoing_rows)
+            progress_cols[2].metric("Done", done_rows)
+            progress_cols[3].metric("Rejected", rejected_rows)
     else:
         st.info(
             "No structured report entries are available for the selected filters."
