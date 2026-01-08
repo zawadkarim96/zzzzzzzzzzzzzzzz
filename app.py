@@ -412,16 +412,64 @@ def prepare_report_grid_payload(
 def _normalize_header(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
 
+REPORT_COLUMN_ALIASES = {
+    "customer_name": ["customer", "client", "client_name", "company", "name"],
+    "reported_complaints": ["complaints", "issues", "issue", "problem"],
+    "product_details": [
+        "product",
+        "product_detail",
+        "product_details",
+        "product_info",
+        "products_sold",
+        "products",
+        "model",
+        "serial",
+        "generator",
+    ],
+    "details_remarks": ["remarks", "remark", "notes", "note", "comments", "comment"],
+    "remarks_history": ["remarks_history", "remarks history", "history"],
+    "phone": ["phone", "contact", "mobile", "contact_no", "contact number", "whatsapp"],
+    "qty": ["qty", "quantity", "pcs", "pieces", "units"],
+    "progress_status": ["progress", "status"],
+    "payment_status": ["payment", "payment_status", "payment status"],
+    "quotation_tk": [
+        "quotation",
+        "quotation_tk",
+        "quotation amount",
+        "quotation value",
+        "quote",
+    ],
+    "work_done_date": ["work_done_date", "work done date", "completion_date"],
+    "donation_cost": ["donation", "donation_cost", "complimentary cost"],
+    "follow_up_date": ["follow_up_date", "follow-up date", "follow up date", "date"],
+    "client_name": ["client_name", "customer_name", "customer", "client"],
+    "address": ["address", "location"],
+    "contact": ["phone", "contact", "mobile"],
+    "product_detail": ["product_detail", "product detail", "product details", "product"],
+    "notes": ["remarks", "notes", "comment", "comments"],
+    "person_in_charge": ["person_in_charge", "person in charge", "incharge", "responsible"],
+    "reminder_date": ["reminder_date", "reminder date", "reminder"],
+}
+
+
+def _build_report_header_map(
+    *, template_key: Optional[str] = None
+) -> dict[str, str]:
+    header_map: dict[str, str] = {}
+    for key, config in _get_report_grid_fields(template_key).items():
+        header_map[_normalize_header(key)] = key
+        header_map[_normalize_header(config["label"])] = key
+        for alias in REPORT_COLUMN_ALIASES.get(key, []):
+            header_map[_normalize_header(alias)] = key
+    return header_map
+
 
 def _suggest_report_column_mapping(
     columns: Iterable[str], *, template_key: Optional[str] = None
 ) -> dict[str, str]:
     """Suggest a mapping from target fields to uploaded columns."""
 
-    header_map: dict[str, str] = {}
-    for key, config in _get_report_grid_fields(template_key).items():
-        header_map[_normalize_header(key)] = key
-        header_map[_normalize_header(config["label"])] = key
+    header_map = _build_report_header_map(template_key=template_key)
 
     suggestions: dict[str, str] = {}
     for col in columns:
@@ -480,10 +528,7 @@ def _import_report_grid_from_dataframe(
         return imported_rows
 
     fields = _get_report_grid_fields(template_key)
-    header_map: dict[str, str] = {}
-    for key, config in fields.items():
-        header_map[_normalize_header(key)] = key
-        header_map[_normalize_header(config["label"])] = key
+    header_map = _build_report_header_map(template_key=template_key)
 
     resolved_mapping: dict[str, str] = {}
     if column_mapping:
@@ -19941,7 +19986,7 @@ def reports_page(conn):
             icon="📝",
         )
         st.caption(
-            "Daily entries are limited to today. Weekly reports unlock on Saturdays, and monthly reports cover only the current month."
+            "Daily entries are limited to today. Weekly and monthly reports can be logged for any selected window."
         )
 
     def _date_or(value, fallback: date) -> date:
@@ -19984,13 +20029,9 @@ def reports_page(conn):
         if period_key == "daily":
             return row_start == today == row_end
         if period_key == "weekly":
-            return (
-                row_start == week_start
-                and row_end == week_end
-                and today.weekday() == 5
-            )
+            return True
         if period_key == "monthly":
-            return row_start == month_start and row_end == month_end
+            return True
         return False
 
 
@@ -20177,10 +20218,7 @@ def reports_page(conn):
                 default_period_key = seed_period
     period_keys = list(REPORT_PERIOD_OPTIONS.keys())
     if not is_admin:
-        allowed_periods = ["daily"]
-        if today.weekday() == 5 or default_period_key == "weekly":
-            allowed_periods.append("weekly")
-        allowed_periods.append("monthly")
+        allowed_periods = ["daily", "weekly", "monthly"]
         period_keys = [key for key in period_keys if key in allowed_periods]
     if not period_keys:
         period_keys = ["daily"]
@@ -20242,53 +20280,30 @@ def reports_page(conn):
             suggestions = _suggest_report_column_mapping(
                 uploaded_df.columns, template_key=template_key
             )
-            if suggestions and import_file is not None:
-                auto_mapping = {source: target for target, source in suggestions.items()}
-                imported_rows = _import_report_grid_from_dataframe(
-                    uploaded_df, auto_mapping, template_key=template_key
-                )
-                if imported_rows:
-                    st.session_state["report_grid_import_rows"] = imported_rows
-                    st.session_state["report_grid_mapping_choices"] = suggestions
-                    st.success(
-                        f"Loaded {len(imported_rows)} row(s) from the uploaded file. They are ready in the grid below."
-                    )
-                    st.session_state.pop("report_grid_import_payload", None)
-                    st.session_state.pop("report_grid_mapping_choices", None)
-                    st.session_state.pop("report_grid_mapping_saved", None)
-                    st.session_state["report_grid_importer_reset"] = True
-                    _safe_rerun()
-                else:
-                    st.warning(
-                        "We could not read any matching columns from that file. Adjust the mapping below to continue.",
-                        icon="⚠️",
-                    )
             mapping_seed = st.session_state.get("report_grid_mapping_choices", {})
-            mapping_saved = st.session_state.get("report_grid_mapping_saved", False)
             map_options = ["(Do not import)"] + list(uploaded_df.columns)
             selected_mapping: dict[str, str] = {}
             load_clicked = False
-            if not mapping_saved:
-                with st.form("report_grid_import_mapper"):
-                    st.caption(
-                        "Align columns from the uploaded file to the report grid fields. Skipped columns will be ignored."
+            with st.form("report_grid_import_mapper"):
+                st.caption(
+                    "Align columns from the uploaded file to the report grid fields. Skipped columns will be ignored."
+                )
+                for key, config in _get_report_grid_fields(template_key).items():
+                    default_choice = mapping_seed.get(key) or suggestions.get(key)
+                    if default_choice not in map_options:
+                        default_choice = "(Do not import)"
+                    choice = st.selectbox(
+                        config["label"],
+                        options=map_options,
+                        index=map_options.index(default_choice)
+                        if default_choice in map_options
+                        else 0,
+                        key=f"report_map_{key}",
+                        help=f"Select the column that represents '{config['label']}'.",
                     )
-                    for key, config in _get_report_grid_fields(template_key).items():
-                        default_choice = mapping_seed.get(key) or suggestions.get(key)
-                        if default_choice not in map_options:
-                            default_choice = "(Do not import)"
-                        choice = st.selectbox(
-                            config["label"],
-                            options=map_options,
-                            index=map_options.index(default_choice)
-                            if default_choice in map_options
-                            else 0,
-                            key=f"report_map_{key}",
-                            help=f"Select the column that represents '{config['label']}'.",
-                        )
-                        if choice != "(Do not import)":
-                            selected_mapping[choice] = key
-                    load_clicked = st.form_submit_button("Load mapped rows into grid")
+                    if choice != "(Do not import)":
+                        selected_mapping[choice] = key
+                load_clicked = st.form_submit_button("Load mapped rows into grid")
 
             if load_clicked:
                 st.session_state["report_grid_mapping_choices"] = {
@@ -20421,15 +20436,10 @@ def reports_page(conn):
         elif period_choice == "weekly":
             base_start = default_start if editing_record else today - timedelta(days=today.weekday())
             base_end = default_end if editing_record else base_start + timedelta(days=6)
-            week_kwargs: dict[str, object] = {}
-            if not is_admin and not editing_record:
-                week_kwargs["min_value"] = current_week_start
-                week_kwargs["max_value"] = current_week_end
             week_value = st.date_input(
                 "Week range",
                 value=(base_start, base_end),
                 key="report_period_weekly",
-                **week_kwargs,
             )
             if isinstance(week_value, (list, tuple)) and len(week_value) == 2:
                 start_date, end_date = week_value
@@ -20445,15 +20455,10 @@ def reports_page(conn):
                 month_seed = base_month.replace(day=1)
             except Exception:
                 month_seed = date(today.year, today.month, 1)
-            month_kwargs: dict[str, object] = {}
-            if not is_admin and not editing_record:
-                month_kwargs["min_value"] = current_month_start
-                month_kwargs["max_value"] = current_month_end
             month_value = st.date_input(
                 "Month",
                 value=month_seed,
                 key="report_period_monthly",
-                **month_kwargs,
             )
             if isinstance(month_value, (list, tuple)) and month_value:
                 month_seed = month_value[0]
