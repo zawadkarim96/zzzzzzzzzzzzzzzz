@@ -5173,12 +5173,29 @@ def apply_theme_css() -> None:
         .ps-ribbon-nav .stButton > button {{
             border-radius: 999px;
         }}
+        .ps-mobile-nav {{
+            display: none;
+            position: sticky;
+            top: 0.75rem;
+            z-index: 1000;
+        }}
+        .ps-mobile-nav button {{
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            min-height: unset;
+        }}
         @media (max-width: 1200px) {{
             .ps-ribbon-nav {{
                 display: block !important;
             }}
             [data-testid="stSidebar"] {{
                 display: none !important;
+            }}
+        }}
+        @media (max-width: 768px) {{
+            .ps-mobile-nav {{
+                display: block;
             }}
         }}
         [data-testid="stTextInput"] input,
@@ -7422,9 +7439,8 @@ def dashboard(conn):
                 _normalize_report_template(value), "Service report"
             )
         )
-        recent_reports["Period"] = recent_reports.apply(
-            lambda row: format_period_range(row.get("period_start"), row.get("period_end")),
-            axis=1,
+        recent_reports["Submitted"] = recent_reports["created_at"].apply(
+            lambda value: format_period_range(value, value)
         )
         recent_reports["Cadence"] = recent_reports["period_type"].apply(
             lambda val: REPORT_PERIOD_OPTIONS.get(clean_text(val) or "", str(val).title())
@@ -7432,7 +7448,7 @@ def dashboard(conn):
         recent_reports["When"] = recent_reports["created_at"].apply(
             lambda value: format_time_ago(value) or format_period_range(value, value)
         )
-        display_cols = ["Team member", "Template", "Cadence", "Period", "When"]
+        display_cols = ["Team member", "Template", "Cadence", "Submitted", "When"]
         recent_display = recent_reports.rename(columns={"owner": "Team member"})
         st.dataframe(
             recent_display[display_cols],
@@ -21102,6 +21118,40 @@ def main():
         st.session_state["nav_selection_sidebar"] = current_page
     elif st.session_state.get("nav_selection_sidebar") not in pages:
         st.session_state["nav_selection_sidebar"] = current_page
+
+    def _render_mobile_nav() -> None:
+        if "nav_selection_mobile" not in st.session_state:
+            st.session_state["nav_selection_mobile"] = current_page
+        elif st.session_state.get("nav_selection_mobile") not in pages:
+            st.session_state["nav_selection_mobile"] = current_page
+        st.markdown('<div class="ps-mobile-nav">', unsafe_allow_html=True)
+        if hasattr(st, "popover"):
+            with st.popover("☰"):
+                st.radio(
+                    "Navigate",
+                    pages,
+                    key="nav_selection_mobile",
+                    on_change=lambda: _sync_nav_choice("nav_selection_mobile"),
+                )
+                if st.button("Logout", key="mobile_logout", use_container_width=True):
+                    _request_logout()
+                    st.rerun()
+        else:
+            with st.expander("☰ Menu", expanded=False):
+                st.radio(
+                    "Navigate",
+                    pages,
+                    key="nav_selection_mobile",
+                    on_change=lambda: _sync_nav_choice("nav_selection_mobile"),
+                )
+                if st.button(
+                    "Logout", key="mobile_logout_expander", use_container_width=True
+                ):
+                    _request_logout()
+                    st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    _render_mobile_nav()
 
     with st.sidebar:
         sidebar_dark = st.toggle(
