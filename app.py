@@ -181,6 +181,16 @@ SERVICE_REPORT_FIELDS = OrderedDict(
             },
         ),
         (
+            "bill_price_tk",
+            {
+                "label": "Bill Price Tk",
+                "type": "number",
+                "format": "%.2f",
+                "step": 100.0,
+                "help": "Final billed amount in Taka.",
+            },
+        ),
+        (
             "work_done_date",
             {
                 "label": "Work Done Date",
@@ -4255,6 +4265,13 @@ def _sanitize_path_component(value: Optional[str]) -> str:
     return cleaned or "item"
 
 
+def _upload_extension(uploaded_file, *, default: str = ".pdf") -> str:
+    ext = Path(getattr(uploaded_file, "name", "") or "").suffix.lower()
+    if not ext:
+        ext = default if default.startswith(".") else f".{default}"
+    return ext
+
+
 def build_customer_groups(conn, only_complete: bool = True):
     criteria = []
     params: list[object] = []
@@ -7850,6 +7867,18 @@ def dashboard(conn):
 
     quote_scope, quote_params = _quotation_scope_filter()
     quote_clause = quote_scope.replace("WHERE", "WHERE", 1)
+    quote_metrics = df_query(
+        conn,
+        dedent(
+            f"""
+            SELECT COUNT(*) AS total_quotes,
+                   SUM(CASE WHEN LOWER(status) = 'paid' THEN 1 ELSE 0 END) AS paid_quotes
+            FROM quotations
+            {quote_clause}
+            """
+        ),
+        quote_params,
+    )
     quotes_df = df_query(
         conn,
         dedent(
@@ -7871,15 +7900,19 @@ def dashboard(conn):
             FROM quotations
             {quote_clause}
             ORDER BY datetime(quote_date) DESC, quotation_id DESC
-            LIMIT 5
+            LIMIT 20
             """
         ),
         quote_params,
     )
     if not quotes_df.empty:
         st.markdown("#### Quotation insights")
-        total_quotes = int(len(quotes_df.index))
-        paid_quotes = int((quotes_df["status"].str.lower() == "paid").sum())
+        if quote_metrics.empty:
+            total_quotes = 0
+            paid_quotes = 0
+        else:
+            total_quotes = int(quote_metrics.iloc[0].get("total_quotes") or 0)
+            paid_quotes = int(quote_metrics.iloc[0].get("paid_quotes") or 0)
         conversion = (paid_quotes / total_quotes) * 100 if total_quotes else 0.0
         metrics_cols = st.columns(3)
         metrics_cols[0].metric("Quotations created", total_quotes)
@@ -11323,8 +11356,8 @@ def customers_page(conn):
                     help="Upload signed agreements, invoices or other supporting paperwork.",
                 )
                 do_pdf = st.file_uploader(
-                    "Attach Delivery Order (PDF)",
-                    type=["pdf"],
+                    "Attach Delivery Order (PDF or image)",
+                    type=["pdf", "png", "jpg", "jpeg", "webp"],
                     key="new_customer_do_pdf",
                     help="Upload the delivery order so it is linked to this record.",
                 )
@@ -11393,8 +11426,8 @@ def customers_page(conn):
                         format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
                     )
                     work_done_pdf = work_done_cols[2].file_uploader(
-                        "Attach work done PDF",
-                        type=["pdf"],
+                        "Attach work done (PDF or image)",
+                        type=["pdf", "png", "jpg", "jpeg", "webp"],
                         key="new_customer_work_done_pdf",
                     )
                     work_done_receipt = st.file_uploader(
@@ -11592,9 +11625,19 @@ def customers_page(conn):
                     stored_path = None
                     if do_pdf is not None:
                         safe_name = _sanitize_path_component(do_serial)
-                        stored_path = store_uploaded_pdf(
-                            do_pdf, DELIVERY_ORDER_DIR, filename=f"{safe_name}.pdf"
+                        doc_ext = _upload_extension(do_pdf, default=".pdf")
+                        stored_path = save_uploaded_file(
+                            do_pdf,
+                            DELIVERY_ORDER_DIR,
+                            filename=f"{safe_name}{doc_ext}",
+                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                            default_extension=".pdf",
                         )
+                        if stored_path:
+                            try:
+                                stored_path = str(stored_path.relative_to(BASE_DIR))
+                            except ValueError:
+                                stored_path = str(stored_path)
                     do_receipt_path = None
                     cur = conn.cursor()
                     existing = cur.execute(
@@ -11711,14 +11754,17 @@ def customers_page(conn):
                         )
                         conn.commit()
                 elif do_pdf is not None and not do_serial:
-                    stored_path = store_uploaded_pdf(
+                    doc_ext = _upload_extension(do_pdf, default=".pdf")
+                    stored_path = save_uploaded_file(
                         do_pdf,
                         DELIVERY_ORDER_DIR,
-                        filename=f"customer_{cid}_delivery_order.pdf",
+                        filename=f"customer_{cid}_delivery_order{doc_ext}",
+                        allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                        default_extension=".pdf",
                     )
                     if stored_path:
                         try:
-                            stored_relative = str(Path(stored_path).relative_to(BASE_DIR))
+                            stored_relative = str(stored_path.relative_to(BASE_DIR))
                         except ValueError:
                             stored_relative = str(stored_path)
                         conn.execute(
@@ -11757,11 +11803,19 @@ def customers_page(conn):
                             work_done_path = None
                             if work_done_pdf is not None:
                                 safe_name = _sanitize_path_component(work_done_serial)
-                                work_done_path = store_uploaded_pdf(
+                                doc_ext = _upload_extension(work_done_pdf, default=".pdf")
+                                work_done_path = save_uploaded_file(
                                     work_done_pdf,
                                     DELIVERY_ORDER_DIR,
-                                    filename=f"work_done_{safe_name}.pdf",
+                                    filename=f"work_done_{safe_name}{doc_ext}",
+                                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                                    default_extension=".pdf",
                                 )
+                                if work_done_path:
+                                    try:
+                                        work_done_path = str(work_done_path.relative_to(BASE_DIR))
+                                    except ValueError:
+                                        work_done_path = str(work_done_path)
                             work_done_saved = False
                             work_done_status_value = normalize_delivery_status(work_done_status)
                             work_done_receipt_path = None
@@ -16173,6 +16227,10 @@ def delivery_orders_page(
         ),
         (record_type_key,),
     )
+    allowed_customers = accessible_customer_ids(conn)
+    existing_dos = filter_delivery_orders_for_view(
+        existing_dos, allowed_customers, record_types={record_type_key}
+    )
     load_labels: dict[Optional[str], str] = {None: f"-- New {record_label_lower} --"}
     load_choices = [None]
     if not existing_dos.empty:
@@ -16335,8 +16393,8 @@ def delivery_orders_page(
             f"Estimated total: {format_money(estimated_total) or f'{estimated_total:,.2f}'}"
         )
         do_file = st.file_uploader(
-            f"Attach {record_label.lower()} (PDF)",
-            type=["pdf"],
+            f"Attach {record_label.lower()} (PDF or image)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
             help="Optional supporting document stored alongside the record.",
             key=f"{record_type_key}_document_upload",
         )
@@ -16400,11 +16458,19 @@ def delivery_orders_page(
                 )
                 return
             if do_file is not None:
-                stored_path = store_uploaded_pdf(
+                doc_ext = _upload_extension(do_file, default=".pdf")
+                stored_path = save_uploaded_file(
                     do_file,
                     DELIVERY_ORDER_DIR,
-                    filename=f"do_{_sanitize_path_component(cleaned_number)}.pdf",
+                    filename=f"do_{_sanitize_path_component(cleaned_number)}{doc_ext}",
+                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                    default_extension=".pdf",
                 )
+                if stored_path:
+                    try:
+                        stored_path = str(stored_path.relative_to(BASE_DIR))
+                    except ValueError:
+                        stored_path = str(stored_path)
             auto_mark_paid = False
             if (
                 status_value == "advanced"
@@ -16684,7 +16750,7 @@ def delivery_orders_page(
                 row_cols[6].write(clean_text(row.get("Receipt")) or "")
             upload_doc = row_cols[7].file_uploader(
                 "Upload document",
-                type=["pdf"],
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
                 label_visibility="collapsed",
                 key=f"do_row_doc_upload_{row_key}",
             )
@@ -16714,14 +16780,22 @@ def delivery_orders_page(
                 else:
                     updates = {}
                     if upload_doc is not None:
-                        stored_path = store_uploaded_pdf(
+                        doc_ext = _upload_extension(upload_doc, default=".pdf")
+                        stored_path = save_uploaded_file(
                             upload_doc,
                             DELIVERY_ORDER_DIR,
                             filename=(
-                                f"{record_type_key}_{_sanitize_path_component(do_number)}.pdf"
+                                f"{record_type_key}_{_sanitize_path_component(do_number)}{doc_ext}"
                             ),
+                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                            default_extension=".pdf",
                         )
-                        updates["file_path"] = stored_path
+                        if stored_path:
+                            try:
+                                stored_path = str(stored_path.relative_to(BASE_DIR))
+                            except ValueError:
+                                stored_path = str(stored_path)
+                            updates["file_path"] = stored_path
                     if upload_receipt is not None:
                         receipt_identifier = _sanitize_path_component(do_number) or "do_receipt"
                         receipt_path = store_payment_receipt(
@@ -20533,13 +20607,17 @@ def reports_page(conn):
                 if helper_label:
                     st.info(helper_label, icon="📝")
         if template_key == "service":
+            customer_scope, customer_params = customer_scope_filter()
+            customer_clause = f"WHERE {customer_scope}" if customer_scope else ""
             customer_df = df_query(
                 conn,
-                """
+                f"""
                 SELECT name, company_name
                 FROM customers
+                {customer_clause}
                 ORDER BY LOWER(COALESCE(name, company_name, ''))
                 """,
+                customer_params,
             )
             customer_options: list[str] = []
             if not customer_df.empty:
