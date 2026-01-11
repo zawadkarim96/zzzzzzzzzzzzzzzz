@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -44,6 +46,7 @@ def ensure_monthly_backup(
     prefix: str,
     build_archive: Callable[[], bytes],
     retention: int,
+    mirror_dir: Optional[Path] = None,
 ) -> tuple[Optional[Path], Optional[str]]:
     metadata_path = backup_dir / "backup_metadata.json"
     now = datetime.now()
@@ -62,15 +65,29 @@ def ensure_monthly_backup(
         with temp_path.open("wb") as handle:
             handle.write(archive_bytes)
         temp_path.replace(destination)
+        mirror_error: Optional[str] = None
+        if mirror_dir is None:
+            mirror_override = os.getenv("PS_BACKUP_MIRROR_DIR")
+            mirror_dir = Path(mirror_override).expanduser() if mirror_override else None
+        if mirror_dir is not None:
+            try:
+                mirror_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(destination, mirror_dir / destination.name)
+            except OSError as exc:
+                mirror_error = str(exc)
         _write_backup_metadata(
             metadata_path,
             {
                 "last_backup_month": current_month,
                 "last_backup_at": now.isoformat(timespec="seconds"),
                 "last_backup_file": destination.name,
+                "mirror_dir": str(mirror_dir) if mirror_dir is not None else "",
+                "mirror_error": mirror_error or "",
             },
         )
         _prune_backups(backup_dir, retention, prefix)
+        if mirror_error:
+            return destination, f"Mirror backup copy failed: {mirror_error}"
         return destination, None
     except Exception as exc:
         return None, str(exc)

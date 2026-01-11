@@ -44,6 +44,14 @@ Regardless of whether you launch from source, the packaged desktop app, or `stre
 
 Staff can back up or migrate the application by copying that folder. Deleting it resets the app to a clean state the next time the executable is opened.
 
+### Linode (or any persistent volume) backups and privacy
+For cloud deployments, point the data directory at your Linode volume so backups, uploads, and staff accounts live on durable storage:
+
+- **CRM app:** set `APP_STORAGE_DIR=/data/ps-business-suites`.
+- **Sales app:** set `PS_SALES_DATA_DIR=/data/ps-sales`.
+
+Automatic monthly backups are written under `<data dir>/backups`. To keep a second copy, set `PS_CRM_BACKUP_MIRROR_DIR` or `PS_SALES_BACKUP_MIRROR_DIR` to another mounted volume or backup path. Each backup archive includes the SQLite database (staff accounts included), an SQL dump, Excel exports, and all stored files, plus a `checksums.txt` file for integrity verification—store these archives securely to preserve privacy.
+
 ## Troubleshooting
 - If Python is not installed or not on your `PATH`, install it from [python.org](https://www.python.org/downloads/) (Windows) or via your package manager (macOS/Linux).
 - To reset everything, delete the `.venv` folder and rerun the launcher to recreate a clean environment.

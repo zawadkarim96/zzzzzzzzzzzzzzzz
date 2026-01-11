@@ -51,6 +51,10 @@ LOCKOUT_SERVICE = AccountLockoutService(CONFIG, USER_REPOSITORY)
 UPLOAD_MANAGER = UploadManager(CONFIG)
 BACKUP_DIR = CONFIG.data_dir / "backups"
 BACKUP_RETENTION_COUNT = int(os.getenv("PS_SALES_BACKUP_RETENTION", "12"))
+BACKUP_MIRROR_DIR = os.getenv("PS_SALES_BACKUP_MIRROR_DIR")
+BACKUP_MIRROR_PATH = (
+    Path(BACKUP_MIRROR_DIR).expanduser() if BACKUP_MIRROR_DIR else None
+)
 
 
 DEFAULT_QUOTATION_STATUSES: Tuple[str, ...] = (
@@ -2207,21 +2211,77 @@ def build_excel_export() -> bytes:
 
 
 def build_full_archive(excel_bytes: Optional[bytes] = None) -> bytes:
-    """Create a compressed archive containing exports and uploaded documents."""
+    """Create a compressed archive containing exports, database data, and uploads."""
+
+    def _hash_bytes(payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
+
+    def _hash_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     archive_buffer = io.BytesIO()
     if excel_bytes is None:
         excel_bytes = build_excel_export()
-    uploads_root = CONFIG.data_dir / "uploads"
+
+    db_path = DATABASE.db_path
+    dump_buffer = io.StringIO()
+    with DATABASE.raw_connection() as conn:
+        for line in conn.iterdump():
+            dump_buffer.write(f"{line}\n")
+    dump_bytes = dump_buffer.getvalue().encode("utf-8")
+
+    data_root = CONFIG.data_dir
+    storage_files = [
+        path
+        for path in (data_root.rglob("*") if data_root.exists() else [])
+        if path.is_file()
+        and not (db_path.exists() and path.resolve() == db_path.resolve())
+    ]
+
+    checksum_lines: list[str] = []
 
     with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        if db_path.exists():
+            arcname = f"database/{db_path.name}"
+            zf.write(db_path, arcname=arcname)
+            checksum_lines.append(f"{_hash_file(db_path)}  {arcname}")
+
+        if dump_bytes:
+            zf.writestr("exports/ps_sales.sql", dump_bytes)
+            checksum_lines.append(
+                f"{_hash_bytes(dump_bytes)}  exports/ps_sales.sql"
+            )
+
         if excel_bytes:
-            zf.writestr("reports/ps_sales_summary.xlsx", excel_bytes)
-        if uploads_root.exists():
-            for path in uploads_root.rglob("*"):
-                if path.is_file():
-                    arcname = Path("uploads") / path.relative_to(uploads_root)
-                    zf.write(path, arcname.as_posix())
+            zf.writestr("exports/ps_sales.xlsx", excel_bytes)
+            checksum_lines.append(
+                f"{_hash_bytes(excel_bytes)}  exports/ps_sales.xlsx"
+            )
+
+        for path in storage_files:
+            arcname = Path("storage") / path.relative_to(data_root)
+            zf.write(path, arcname.as_posix())
+            checksum_lines.append(f"{_hash_file(path)}  {arcname.as_posix()}")
+
+        manifest_lines = [
+            f"Export generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            (
+                "Database: includes users, staff accounts, and application records. "
+                "Protect this archive to preserve privacy."
+            ),
+            f"Database path: {db_path} (included: {'yes' if db_path.exists() else 'no'})",
+            "SQL dump: exports/ps_sales.sql",
+            "Excel export: exports/ps_sales.xlsx",
+            f"Storage directory: {data_root} (files: {len(storage_files)})",
+            f"Checksum file: checksums.txt (entries: {len(checksum_lines)})",
+        ]
+        zf.writestr("manifest.txt", "\n".join(manifest_lines))
+        if checksum_lines:
+            zf.writestr("checksums.txt", "\n".join(checksum_lines))
 
     archive_buffer.seek(0)
     return archive_buffer.getvalue()
@@ -5951,6 +6011,7 @@ def main() -> None:
         "ps_sales_backup",
         build_full_archive,
         BACKUP_RETENTION_COUNT,
+        BACKUP_MIRROR_PATH,
     )
     st.session_state["auto_backup_error"] = backup_error
     if st.session_state.pop("logout_requested", False):
