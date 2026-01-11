@@ -67,6 +67,10 @@ DATE_FMT = "%d-%m-%Y"
 CURRENCY_SYMBOL = os.getenv("APP_CURRENCY_SYMBOL", "৳")
 BACKUP_DIR = BASE_DIR / "backups"
 BACKUP_RETENTION_COUNT = int(os.getenv("PS_CRM_BACKUP_RETENTION", "12"))
+BACKUP_MIRROR_DIR = os.getenv("PS_CRM_BACKUP_MIRROR_DIR")
+BACKUP_MIRROR_PATH = (
+    Path(BACKUP_MIRROR_DIR).expanduser() if BACKUP_MIRROR_DIR else None
+)
 
 UPLOADS_DIR = BASE_DIR / "uploads"
 DELIVERY_ORDER_DIR = UPLOADS_DIR / "delivery_orders"
@@ -5960,6 +5964,16 @@ def export_full_archive(
     - Every file under the application storage directory (uploads, receipts, etc.).
     """
 
+    def _hash_bytes(payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
+
+    def _hash_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     buffer = io.BytesIO()
     close_conn = False
     active_conn = conn
@@ -6007,27 +6021,39 @@ def export_full_archive(
             resource_counts[res] = len(files)
             resource_files.extend(files)
 
+        checksum_lines: list[str] = []
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
             if db_path.exists():
-                zf.write(db_path, arcname=f"database/{db_path.name}")
+                arcname = f"database/{db_path.name}"
+                zf.write(db_path, arcname=arcname)
+                checksum_lines.append(f"{_hash_file(db_path)}  {arcname}")
 
             if dump_bytes:
                 zf.writestr("exports/ps_crm.sql", dump_bytes)
+                checksum_lines.append(
+                    f"{_hash_bytes(dump_bytes)}  exports/ps_crm.sql"
+                )
 
             if excel_bytes:
                 zf.writestr(
                     "exports/ps_crm.xlsx",
                     excel_bytes,
                 )
+                checksum_lines.append(
+                    f"{_hash_bytes(excel_bytes)}  exports/ps_crm.xlsx"
+                )
 
             if BASE_DIR.exists():
                 for path in storage_files:
-                    zf.write(path, arcname=str(Path("storage") / path.relative_to(BASE_DIR)))
+                    arcname = Path("storage") / path.relative_to(BASE_DIR)
+                    zf.write(path, arcname=str(arcname))
+                    checksum_lines.append(f"{_hash_file(path)}  {arcname}")
 
             for res in resource_paths:
                 for file_path in _iter_files(res):
                     arcname = Path("resources") / file_path.relative_to(res.parent)
                     zf.write(file_path, arcname=str(arcname))
+                    checksum_lines.append(f"{_hash_file(file_path)}  {arcname}")
 
             total_exports = 0
             if dump_bytes:
@@ -6036,10 +6062,15 @@ def export_full_archive(
                 total_exports += 1
             manifest_lines = [
                 f"Export generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                (
+                    "Database: includes users, staff accounts, and application records. "
+                    "Protect this archive to preserve privacy."
+                ),
                 f"Database path: {db_path} (included: {'yes' if db_path.exists() else 'no'})",
                 "SQL dump: exports/ps_crm.sql",
                 "Excel export: exports/ps_crm.xlsx",
                 f"Storage directory: {BASE_DIR} (files: {len(storage_files)})",
+                f"Checksum file: checksums.txt (entries: {len(checksum_lines)})",
             ]
             for res in resource_paths:
                 manifest_lines.append(
@@ -6050,6 +6081,8 @@ def export_full_archive(
                 f"{len(storage_files) + len(resource_files) + (1 if db_path.exists() else 0) + total_exports + 1}"
             )
             zf.writestr("manifest.txt", "\n".join(manifest_lines))
+            if checksum_lines:
+                zf.writestr("checksums.txt", "\n".join(checksum_lines))
     finally:
         if close_conn:
             active_conn.close()
@@ -21146,6 +21179,7 @@ def main():
         "ps_crm_backup",
         lambda: export_full_archive(conn),
         BACKUP_RETENTION_COUNT,
+        BACKUP_MIRROR_PATH,
     )
     st.session_state["auto_backup_error"] = backup_error
     login_box(conn, render_id=render_id)
