@@ -9961,7 +9961,9 @@ def _render_doc_detail_inputs(
             column_config={
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
-                "rate": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "rate": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
             },
         )
         items_records = (
@@ -10024,7 +10026,9 @@ def _render_doc_detail_inputs(
             column_config={
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
-                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
             },
         )
         items_records = (
@@ -10107,7 +10111,9 @@ def _render_doc_detail_inputs(
             column_config={
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
-                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
             },
         )
         items_records = (
@@ -10172,7 +10178,9 @@ def _render_doc_detail_inputs(
             column_config={
                 "description": st.column_config.TextColumn("Product"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
-                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
             },
         )
         items_records = (
@@ -10237,7 +10245,9 @@ def _render_doc_detail_inputs(
             column_config={
                 "description": st.column_config.TextColumn("Item"),
                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
-                "unit_price": st.column_config.NumberColumn("Price", min_value=0.0, step=100.0, format="%.2f"),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
             },
         )
         items_records = (
@@ -16204,6 +16214,11 @@ def delivery_orders_page(
     record_label_input = clean_text(record_type_label)
     record_label = record_label_input or "Delivery order"
     record_label_lower = record_label.lower()
+    if st.session_state.pop("delivery_order_form_reset_pending", False):
+        _reset_delivery_order_form_state()
+    feedback_message = st.session_state.pop("delivery_order_form_feedback", None)
+    if feedback_message:
+        st.success(feedback_message)
     st.session_state.setdefault("delivery_order_items_rows", _default_delivery_items())
     st.session_state.setdefault("delivery_order_number", "")
     st.session_state.setdefault("delivery_order_customer", None)
@@ -16647,8 +16662,12 @@ def delivery_orders_page(
                 entity_id=None,
             )
 
-            _reset_delivery_order_form_state()
-            st.success(f"{record_label} {cleaned_number} saved successfully.")
+            st.session_state["delivery_order_form_reset_pending"] = True
+            st.session_state["delivery_order_form_feedback"] = (
+                f"{record_label} {cleaned_number} saved successfully."
+            )
+            _safe_rerun()
+            return
 
     number_label = f"{record_label} number"
     st.markdown(f"### {record_label} search")
@@ -17005,34 +17024,25 @@ def operations_page(conn):
     st.markdown("---")
     render_operations_document_uploader(conn, key_prefix="operations_uploads")
     st.markdown("---")
-    record_options = {
-        "Delivery orders": ("Delivery order", "delivery_order"),
-        "Work done": ("Work done", "work_done"),
-        "Service": None,
-        "Maintenance": None,
-    }
-    selection = st.selectbox(
-        "Record type",
-        list(record_options.keys()),
-        key="operations_record_type",
-    )
-    previous_selection = st.session_state.get("operations_record_type_prev")
-    if previous_selection and previous_selection != selection:
-        _reset_delivery_order_form_state()
-    st.session_state["operations_record_type_prev"] = selection
-
-    if selection in ("Delivery orders", "Work done"):
-        record_label, record_key = record_options[selection]
+    tabs = st.tabs(["Delivery orders", "Work done", "Service", "Maintenance"])
+    with tabs[0]:
         delivery_orders_page(
             conn,
             show_heading=False,
-            record_type_label=record_label,
-            record_type_key=record_key,
+            record_type_label="Delivery order",
+            record_type_key="delivery_order",
         )
-    elif selection == "Service":
+    with tabs[1]:
+        delivery_orders_page(
+            conn,
+            show_heading=False,
+            record_type_label="Work done",
+            record_type_key="work_done",
+        )
+    with tabs[2]:
         st.markdown("### Service records")
         _render_service_section(conn, show_heading=False)
-    elif selection == "Maintenance":
+    with tabs[3]:
         st.markdown("### Maintenance records")
         _render_maintenance_section(conn, show_heading=False)
 
@@ -17071,9 +17081,15 @@ def service_maintenance_page(conn):
 def customer_summary_page(conn):
     st.subheader("📒 Customer Summary")
     blank_label = "(blank)"
+    show_complete_only = st.checkbox(
+        "Only show customers with phone + address",
+        value=False,
+        help="Enable this to hide incomplete customer records from the summary.",
+    )
     complete_clause = customer_complete_clause()
+    name_clause = "TRIM(COALESCE(name, '')) <> ''"
     scope_clause, scope_params = customer_scope_filter()
-    where_parts = [complete_clause]
+    where_parts = [complete_clause if show_complete_only else name_clause]
     params: list[object] = []
     if scope_clause:
         where_parts.append(scope_clause)
@@ -17091,9 +17107,12 @@ def customer_summary_page(conn):
         tuple(params),
     )
     if customers.empty:
-        st.info(
-            "No complete customers available for your account. Check the Scraps page for records that need details."
-        )
+        if show_complete_only:
+            st.info(
+                "No complete customers available for your account. Check the Scraps page for records that need details."
+            )
+        else:
+            st.info("No customers available for your account yet.")
         return
 
     names = customers["name"].tolist()
@@ -18278,6 +18297,23 @@ def import_page(conn):
             "quantity": pick(sel_quantity),
         }
     )
+    text_columns = [
+        "customer_name",
+        "address",
+        "delivery_address",
+        "phone",
+        "product",
+        "do_code",
+        "work_done_code",
+        "service_code",
+        "maintenance_code",
+        "remarks",
+    ]
+    for column in text_columns:
+        if column in df_norm.columns:
+            df_norm[column] = df_norm[column].apply(
+                lambda value: "" if pd.isna(value) else str(value)
+            )
     df_norm["quantity"] = df_norm["quantity"].apply(parse_quantity)
     skip_blanks = st.checkbox("Skip blank rows", value=True)
     df_norm = refine_multiline(df_norm)
