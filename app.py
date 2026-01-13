@@ -1071,7 +1071,12 @@ CREATE TABLE IF NOT EXISTS services (
     bill_document_path TEXT,
     report_id INTEGER,
     report_row_index INTEGER,
+    payment_status TEXT DEFAULT 'pending',
+    payment_receipt_path TEXT,
+    created_by INTEGER,
     updated_at TEXT DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(do_number) REFERENCES delivery_orders(do_number) ON DELETE SET NULL,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL
 );
@@ -1087,7 +1092,12 @@ CREATE TABLE IF NOT EXISTS maintenance_records (
     remarks TEXT,
     maintenance_product_info TEXT,
     total_amount REAL,
+    payment_status TEXT DEFAULT 'pending',
+    payment_receipt_path TEXT,
+    created_by INTEGER,
     updated_at TEXT DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(do_number) REFERENCES delivery_orders(do_number) ON DELETE SET NULL,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL
 );
@@ -1140,6 +1150,9 @@ CREATE TABLE IF NOT EXISTS operations_other_documents (
     original_name TEXT,
     uploaded_by INTEGER,
     uploaded_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE,
     FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
@@ -1348,6 +1361,10 @@ def ensure_schema_upgrades(conn):
     add_column("services", "payment_receipt_path", "TEXT")
     add_column("maintenance_records", "payment_status", "TEXT DEFAULT 'pending'")
     add_column("maintenance_records", "payment_receipt_path", "TEXT")
+    add_column("services", "deleted_at", "TEXT")
+    add_column("services", "deleted_by", "INTEGER")
+    add_column("maintenance_records", "deleted_at", "TEXT")
+    add_column("maintenance_records", "deleted_by", "INTEGER")
     add_column("quotations", "payment_receipt_path", "TEXT")
     add_column("quotations", "items_payload", "TEXT")
     add_column("maintenance_records", "maintenance_start_date", "TEXT")
@@ -1385,6 +1402,9 @@ def ensure_schema_upgrades(conn):
     add_column("delivery_orders", "updated_at", "TEXT DEFAULT (datetime('now'))")
     add_column("delivery_orders", "deleted_at", "TEXT")
     add_column("delivery_orders", "deleted_by", "INTEGER")
+    add_column("operations_other_documents", "updated_at", "TEXT DEFAULT (datetime('now'))")
+    add_column("operations_other_documents", "deleted_at", "TEXT")
+    add_column("operations_other_documents", "deleted_by", "INTEGER")
     add_column("import_history", "amount_spent", "REAL")
     add_column("import_history", "imported_by", "INTEGER")
     add_column("import_history", "delivery_address", "TEXT")
@@ -1766,6 +1786,7 @@ def fetch_sales_metrics(conn, scope_clause: str, scope_params: tuple[object, ...
 
     def _sum_services(where_clause: str) -> float:
         filters = [
+            "s.deleted_at IS NULL",
             "s.payment_status = 'paid'",
             "s.bill_amount IS NOT NULL",
         ]
@@ -1786,6 +1807,7 @@ def fetch_sales_metrics(conn, scope_clause: str, scope_params: tuple[object, ...
 
     def _sum_maintenance(where_clause: str) -> float:
         filters = [
+            "m.deleted_at IS NULL",
             "m.payment_status = 'paid'",
             "m.total_amount IS NOT NULL",
         ]
@@ -4912,6 +4934,7 @@ def _build_services_export(conn) -> pd.DataFrame:
         LEFT JOIN customers c ON c.customer_id = s.customer_id
         LEFT JOIN delivery_orders d ON d.do_number = s.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
+        WHERE s.deleted_at IS NULL
         ORDER BY datetime(s.service_date) DESC, s.service_id DESC
         """
     )
@@ -4958,6 +4981,7 @@ def _build_maintenance_export(conn) -> pd.DataFrame:
         LEFT JOIN customers c ON c.customer_id = m.customer_id
         LEFT JOIN delivery_orders d ON d.do_number = m.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
+        WHERE m.deleted_at IS NULL
         ORDER BY datetime(m.maintenance_date) DESC, m.maintenance_id DESC
         """
     )
@@ -7448,6 +7472,7 @@ def dashboard(conn):
                    COALESCE(c.company_name, c.name, '(customer)') AS customer
             FROM services s
             LEFT JOIN customers c ON c.customer_id = s.customer_id
+            WHERE s.deleted_at IS NULL
             ORDER BY datetime(s.updated_at) DESC, s.service_id DESC
             LIMIT 30
             """,
@@ -7467,6 +7492,7 @@ def dashboard(conn):
                    COALESCE(c.company_name, c.name, '(customer)') AS customer
             FROM maintenance_records m
             LEFT JOIN customers c ON c.customer_id = m.customer_id
+            WHERE m.deleted_at IS NULL
             ORDER BY datetime(m.updated_at) DESC, m.maintenance_id DESC
             LIMIT 30
             """,
@@ -8556,6 +8582,7 @@ def dashboard(conn):
             LEFT JOIN customers c ON c.customer_id = s.customer_id
             LEFT JOIN delivery_orders d ON d.do_number = s.do_number
             LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
+            WHERE s.deleted_at IS NULL
             ORDER BY datetime(s.service_date) DESC, s.service_id DESC
             LIMIT 10
             """,
@@ -8605,6 +8632,7 @@ def dashboard(conn):
             LEFT JOIN customers c ON c.customer_id = m.customer_id
             LEFT JOIN delivery_orders d ON d.do_number = m.do_number
             LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
+            WHERE m.deleted_at IS NULL
             ORDER BY datetime(m.maintenance_date) DESC, m.maintenance_id DESC
             LIMIT 10
             """,
@@ -8784,7 +8812,8 @@ def show_expiry_notifications(conn):
         LEFT JOIN customers c ON c.customer_id = s.customer_id
         LEFT JOIN delivery_orders d ON d.do_number = s.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
-        WHERE COALESCE(s.service_start_date, s.service_date) IS NOT NULL
+        WHERE s.deleted_at IS NULL
+          AND COALESCE(s.service_start_date, s.service_date) IS NOT NULL
           AND date(COALESCE(s.service_start_date, s.service_date)) = date('now')
         ORDER BY datetime(COALESCE(s.service_start_date, s.service_date)) ASC, s.service_id ASC
         """,
@@ -8804,7 +8833,8 @@ def show_expiry_notifications(conn):
         LEFT JOIN customers c ON c.customer_id = m.customer_id
         LEFT JOIN delivery_orders d ON d.do_number = m.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
-        WHERE COALESCE(m.maintenance_start_date, m.maintenance_date) IS NOT NULL
+        WHERE m.deleted_at IS NULL
+          AND COALESCE(m.maintenance_start_date, m.maintenance_date) IS NOT NULL
           AND date(COALESCE(m.maintenance_start_date, m.maintenance_date)) = date('now')
         ORDER BY datetime(COALESCE(m.maintenance_start_date, m.maintenance_date)) ASC, m.maintenance_id ASC
         """,
@@ -9470,6 +9500,7 @@ def render_customer_quick_edit_section(
             FROM services s
             LEFT JOIN service_documents sd ON sd.service_id = s.service_id
             WHERE s.customer_id IN ({placeholders})
+              AND s.deleted_at IS NULL
             ORDER BY datetime(s.updated_at) DESC
             """,
             tuple(customer_ids),
@@ -9513,6 +9544,7 @@ def render_customer_quick_edit_section(
             FROM maintenance_records m
             LEFT JOIN maintenance_documents md ON md.maintenance_id = m.maintenance_id
             WHERE m.customer_id IN ({placeholders})
+              AND m.deleted_at IS NULL
             ORDER BY datetime(m.updated_at) DESC
             """,
             tuple(customer_ids),
@@ -11346,6 +11378,7 @@ def render_operations_document_uploader(
         SELECT document_id, description, items_payload, file_path, original_name, uploaded_at
         FROM operations_other_documents
         WHERE customer_id=?
+          AND deleted_at IS NULL
         ORDER BY datetime(uploaded_at) DESC, document_id DESC
         """,
         (int(selected_customer),),
@@ -11376,9 +11409,348 @@ def render_operations_document_uploader(
                     )
 
 
+def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
+    st.markdown("### Other operations records")
+    customer_options, customer_labels, _, _ = fetch_customer_choices(conn, only_complete=False)
+    if not customer_options:
+        st.info("No customers available for other operation records yet.")
+        return
+
+    filter_cols = st.columns((1.1, 1.4))
+    with filter_cols[0]:
+        customer_filter = st.selectbox(
+            "Filter by customer",
+            options=[None] + [cid for cid in customer_options if cid is not None],
+            format_func=lambda cid: customer_labels.get(cid, "(any)"),
+            key=f"{key_prefix}_other_customer_filter",
+        )
+    with filter_cols[1]:
+        search_text = st.text_input(
+            "Search description or file name",
+            key=f"{key_prefix}_other_search",
+        )
+
+    other_df = df_query(
+        conn,
+        """
+        SELECT o.document_id,
+               o.customer_id,
+               o.description,
+               o.items_payload,
+               o.file_path,
+               o.original_name,
+               o.uploaded_at,
+               o.updated_at,
+               o.uploaded_by,
+               COALESCE(c.name, c.company_name, '(customer)') AS customer,
+               COALESCE(u.username, '(user)') AS uploaded_by_name
+        FROM operations_other_documents o
+        LEFT JOIN customers c ON c.customer_id = o.customer_id
+        LEFT JOIN users u ON u.user_id = o.uploaded_by
+        WHERE o.deleted_at IS NULL
+        ORDER BY datetime(o.uploaded_at) DESC, o.document_id DESC
+        """,
+    )
+    if customer_filter:
+        other_df = other_df[other_df["customer_id"] == int(customer_filter)]
+    if search_text:
+        needle = search_text.lower()
+        other_df = other_df[
+            other_df.apply(
+                lambda row: any(
+                    needle in str(row.get(col, "")).lower()
+                    for col in ["description", "original_name", "customer"]
+                ),
+                axis=1,
+            )
+        ]
+
+    if other_df.empty:
+        st.caption("No other operations records found for the selected filters.")
+        return
+
+    def _summarize_items(payload: object) -> str:
+        if not payload:
+            return ""
+        try:
+            items = json.loads(payload) if isinstance(payload, str) else payload
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(items, list):
+            return ""
+        summary_bits = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            desc = clean_text(item.get("description")) or clean_text(item.get("name"))
+            qty = _coerce_float(item.get("quantity"), 0.0)
+            if desc:
+                qty_label = f" x{int(qty)}" if qty else ""
+                summary_bits.append(f"{desc}{qty_label}")
+        return ", ".join(summary_bits)
+
+    display_df = other_df.copy()
+    display_df["items_summary"] = display_df["items_payload"].apply(_summarize_items)
+    display_df = fmt_dates(display_df, ["uploaded_at", "updated_at"])
+    display_df["Document"] = display_df["file_path"].apply(
+        lambda fp: "📎" if clean_text(fp) else ""
+    )
+    display_df = display_df.rename(
+        columns={
+            "description": "Description",
+            "customer": "Customer",
+            "items_summary": "Items",
+            "uploaded_at": "Uploaded",
+            "updated_at": "Updated",
+            "uploaded_by_name": "Uploaded by",
+        }
+    )
+    st.dataframe(
+        display_df[
+            ["Description", "Customer", "Items", "Uploaded", "Updated", "Document", "Uploaded by"]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    other_records = other_df.to_dict("records")
+    record_labels = {
+        int(row["document_id"]): " • ".join(
+            part
+            for part in [
+                clean_text(row.get("description")) or f"Other #{int(row['document_id'])}",
+                clean_text(row.get("customer")),
+            ]
+            if part
+        )
+        for row in other_records
+    }
+    record_choices = list(record_labels.keys())
+
+    st.markdown("#### Edit other record")
+    selected_id = st.selectbox(
+        "Select a record",
+        record_choices,
+        format_func=lambda rid: record_labels.get(rid, f"Other #{rid}"),
+        key=f"{key_prefix}_other_edit_select",
+    )
+    selected_record = next(
+        row for row in other_records if int(row["document_id"]) == int(selected_id)
+    )
+    existing_file_path = resolve_upload_path(selected_record.get("file_path"))
+    if existing_file_path and existing_file_path.exists():
+        st.download_button(
+            "Download current document",
+            data=existing_file_path.read_bytes(),
+            file_name=existing_file_path.name,
+            key=f"{key_prefix}_other_download_{int(selected_id)}",
+        )
+    existing_items_payload = clean_text(selected_record.get("items_payload"))
+    try:
+        existing_items = json.loads(existing_items_payload) if existing_items_payload else []
+    except (TypeError, ValueError):
+        existing_items = []
+    if not isinstance(existing_items, list):
+        existing_items = []
+    if not existing_items:
+        existing_items = _default_simple_items()
+
+    items_df = pd.DataFrame(existing_items)
+    for col in ["description", "quantity", "unit_price", "total"]:
+        if col not in items_df.columns:
+            items_df[col] = 0.0 if col != "description" else ""
+    items_df["total"] = items_df.apply(
+        lambda row: max(
+            _coerce_float(row.get("quantity"), 0.0)
+            * _coerce_float(row.get("unit_price"), 0.0),
+            0.0,
+        ),
+        axis=1,
+    )
+    actor_id = current_user_id()
+    is_admin = current_user_is_admin()
+    can_edit = is_admin or (
+        actor_id is not None
+        and int_or_none(selected_record.get("uploaded_by")) == int(actor_id)
+    )
+    with st.form(f"{key_prefix}_other_edit_form"):
+        description_input = st.text_area(
+            "Description",
+            value=clean_text(selected_record.get("description")) or "",
+            key=f"{key_prefix}_other_edit_desc",
+        )
+        edited_items = st.data_editor(
+            items_df[["description", "quantity", "unit_price"]],
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key=f"{key_prefix}_other_edit_items",
+            column_config={
+                "description": st.column_config.TextColumn("Item"),
+                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=1.0, format="%d"),
+                "unit_price": st.column_config.NumberColumn(
+                    "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                ),
+            },
+        )
+        replace_file = st.file_uploader(
+            "Replace document (optional)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key=f"{key_prefix}_other_edit_file",
+        )
+        save_changes = st.form_submit_button(
+            "Save other record",
+            type="primary",
+            disabled=not can_edit,
+        )
+
+    if save_changes:
+        if not can_edit:
+            st.error("Only admins or the original uploader can edit this record.")
+            return
+        items_records = (
+            edited_items.to_dict("records") if isinstance(edited_items, pd.DataFrame) else []
+        )
+        cleaned_items, _ = normalize_simple_items(items_records)
+        items_payload = json.dumps(cleaned_items, ensure_ascii=False) if cleaned_items else None
+        stored_path = clean_text(selected_record.get("file_path"))
+        original_name = clean_text(selected_record.get("original_name"))
+        if replace_file is not None:
+            target_dir = OPERATIONS_OTHER_DIR
+            target_dir.mkdir(parents=True, exist_ok=True)
+            safe_original = Path(replace_file.name or "other_document.pdf").name
+            filename = f"other_{int(selected_record['customer_id'])}_{safe_original}"
+            saved_path = save_uploaded_file(
+                replace_file,
+                target_dir,
+                filename=filename,
+                allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                default_extension=".pdf",
+            )
+            if saved_path:
+                try:
+                    stored_path = str(saved_path.relative_to(BASE_DIR))
+                except ValueError:
+                    stored_path = str(saved_path)
+                original_name = safe_original
+        conn.execute(
+            """
+            UPDATE operations_other_documents
+            SET description=?,
+                items_payload=?,
+                file_path=?,
+                original_name=?,
+                updated_at=datetime('now')
+            WHERE document_id=?
+              AND deleted_at IS NULL
+            """,
+            (
+                clean_text(description_input),
+                items_payload,
+                stored_path,
+                original_name,
+                int(selected_id),
+            ),
+        )
+        conn.commit()
+        log_activity(
+            conn,
+            event_type="operations_other_updated",
+            description=f"Other record #{int(selected_id)} updated",
+            entity_type="operations_other",
+            entity_id=int(selected_id),
+            user_id=actor_id,
+        )
+        st.success("Other record updated.")
+        _safe_rerun()
+
+    st.markdown("#### Delete other record")
+    can_delete = can_edit
+    confirm_delete = st.checkbox(
+        "I understand this record will be removed from active views.",
+        key=f"{key_prefix}_other_delete_confirm",
+    )
+    if st.button(
+        "Delete other record",
+        type="secondary",
+        disabled=not (confirm_delete and can_delete),
+        key=f"{key_prefix}_other_delete_button",
+    ):
+        if not can_delete:
+            st.error("Only admins or the original uploader can delete this record.")
+            return
+        conn.execute(
+            """
+            UPDATE operations_other_documents
+            SET deleted_at=datetime('now'),
+                deleted_by=?
+            WHERE document_id=?
+              AND deleted_at IS NULL
+            """,
+            (actor_id, int(selected_id)),
+        )
+        conn.commit()
+        log_activity(
+            conn,
+            event_type="operations_other_deleted",
+            description=f"Other record #{int(selected_id)} deleted",
+            entity_type="operations_other",
+            entity_id=int(selected_id),
+            user_id=actor_id,
+        )
+        st.warning("Other record deleted.")
+        _safe_rerun()
+
+
 def operations_page(conn):
     st.subheader("🛠️ Operations")
-    render_operations_document_uploader(conn, key_prefix="operations_page")
+    st.caption(
+        "Review delivery orders, work done, service, maintenance, and other operational records in one place."
+    )
+    tabs = st.tabs(
+        [
+            "Uploads",
+            "Delivery orders",
+            "Work done",
+            "Service",
+            "Maintenance",
+            "Others",
+        ]
+    )
+    with tabs[0]:
+        render_operations_document_uploader(conn, key_prefix="operations_page")
+    with tabs[1]:
+        delivery_orders_page(conn, show_heading=False, record_type_label="Delivery order", record_type_key="delivery_order")
+    with tabs[2]:
+        delivery_orders_page(conn, show_heading=False, record_type_label="Work done", record_type_key="work_done")
+    with tabs[3]:
+        _render_service_section(conn, show_heading=False)
+    with tabs[4]:
+        _render_maintenance_section(conn, show_heading=False)
+    with tabs[5]:
+        _render_operations_other_manager(conn, key_prefix="operations_page")
+
+    if current_user_is_admin():
+        with st.expander("Admin activity log", expanded=False):
+            activity = fetch_activity_feed(conn, limit=50)
+            if not activity:
+                st.caption("No recent activity yet.")
+            else:
+                activity_df = pd.DataFrame(activity)
+                activity_df = fmt_dates(activity_df, ["timestamp"])
+                activity_df = activity_df.rename(
+                    columns={
+                        "timestamp": "When",
+                        "actor": "Staff",
+                        "event_type": "Event",
+                        "message": "Details",
+                    }
+                )
+                st.dataframe(
+                    activity_df[["When", "Staff", "Event", "Details"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 def customers_page(conn):
@@ -13035,6 +13407,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
         LEFT JOIN delivery_orders d ON d.do_number = s.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
         LEFT JOIN service_documents sd ON sd.service_id = s.service_id
+        WHERE s.deleted_at IS NULL
         GROUP BY s.service_id
         ORDER BY datetime(COALESCE(s.service_start_date, s.service_date)) DESC, s.service_id DESC
         """,
@@ -13065,26 +13438,26 @@ def _render_service_section(conn, *, show_heading: bool = True):
             ),
             axis=1,
         )
-        service_df.drop(
+        service_records = service_df.to_dict("records")
+        display_df = service_df.drop(
             columns=["customer_id", "do_customer_id", "created_by"],
-            inplace=True,
             errors="ignore",
         )
-        service_df["Last update"] = pd.to_datetime(service_df.get("updated_at"), errors="coerce").dt.strftime("%d-%m-%Y %H:%M")
-        service_df.loc[service_df["Last update"].isna(), "Last update"] = None
-        if "status" in service_df.columns:
-            service_df["status"] = service_df["status"].apply(lambda x: clean_text(x) or DEFAULT_SERVICE_STATUS)
-        if "condition_status" in service_df.columns:
-            service_df["condition_status"] = service_df["condition_status"].apply(
+        display_df["Last update"] = pd.to_datetime(display_df.get("updated_at"), errors="coerce").dt.strftime("%d-%m-%Y %H:%M")
+        display_df.loc[display_df["Last update"].isna(), "Last update"] = None
+        if "status" in display_df.columns:
+            display_df["status"] = display_df["status"].apply(lambda x: clean_text(x) or DEFAULT_SERVICE_STATUS)
+        if "condition_status" in display_df.columns:
+            display_df["condition_status"] = display_df["condition_status"].apply(
                 lambda x: clean_text(x) or "Not recorded"
             )
-        if "bill_amount" in service_df.columns:
-            service_df["service_amount_display"] = service_df["bill_amount"].apply(format_money)
-        if "payment_receipt_path" in service_df.columns:
-            service_df["payment_receipt_display"] = service_df["payment_receipt_path"].apply(
+        if "bill_amount" in display_df.columns:
+            display_df["service_amount_display"] = display_df["bill_amount"].apply(format_money)
+        if "payment_receipt_path" in display_df.columns:
+            display_df["payment_receipt_display"] = display_df["payment_receipt_path"].apply(
                 lambda x: "📎" if clean_text(x) else ""
             )
-        display = service_df.rename(
+        display = display_df.rename(
             columns={
                 "do_number": "DO Serial",
                 "service_date": "Service date",
@@ -13110,7 +13483,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
             use_container_width=True,
         )
 
-        records = service_df.to_dict("records")
+        records = service_records
         st.markdown("#### Update status & remarks")
         options = [int(r["service_id"]) for r in records]
         def service_label(record):
@@ -13288,6 +13661,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
                         payment_receipt_path = COALESCE(?, payment_receipt_path),
                         updated_at = datetime('now')
                     WHERE service_id = ?
+                      AND deleted_at IS NULL
                     """,
                     (
                         new_status,
@@ -13378,6 +13752,68 @@ def _render_service_section(conn, *, show_heading: bool = True):
                 _safe_rerun()
             else:
                 st.info("Select at least one PDF to upload.")
+
+        st.markdown("#### Delete service record")
+        actor_id = current_user_id()
+        is_admin = current_user_is_admin()
+        deletable_df = pd.DataFrame(service_records)
+        if not is_admin and actor_id is not None and not deletable_df.empty:
+            deletable_df = deletable_df[
+                deletable_df["created_by"].apply(
+                    lambda val: int(_coerce_float(val, -1)) == actor_id
+                )
+            ]
+        if deletable_df.empty:
+            st.caption("No service records available for deletion.")
+        else:
+            delete_labels: dict[int, str] = {}
+            for _, row in deletable_df.iterrows():
+                service_id = int(row.get("service_id"))
+                do_ref = clean_text(row.get("do_number")) or "Service"
+                customer_ref = clean_text(row.get("customer")) or "(customer)"
+                period_ref = clean_text(row.get("service_period"))
+                label_parts = [do_ref, customer_ref]
+                if period_ref:
+                    label_parts.append(period_ref)
+                delete_labels[service_id] = " • ".join(label_parts)
+            delete_options = list(delete_labels.keys())
+            selected_delete_id = st.selectbox(
+                "Select a service entry to delete",
+                delete_options,
+                format_func=lambda val: delete_labels.get(val, f"Service #{val}"),
+                key="service_delete_select",
+            )
+            confirm_delete = st.checkbox(
+                "I understand this service entry will be removed from active views.",
+                key="service_delete_confirm",
+            )
+            if st.button(
+                "Delete service record",
+                type="secondary",
+                disabled=not confirm_delete,
+                key="service_delete_button",
+            ):
+                conn.execute(
+                    """
+                    UPDATE services
+                    SET deleted_at=datetime('now'),
+                        deleted_by=?
+                    WHERE service_id=?
+                      AND deleted_at IS NULL
+                    """,
+                    (actor_id, selected_delete_id),
+                )
+                conn.commit()
+                log_activity(
+                    conn,
+                    event_type="service_deleted",
+                    description=f"Service #{selected_delete_id} deleted",
+                    entity_type="service",
+                    entity_id=int(selected_delete_id),
+                    user_id=actor_id,
+                )
+                st.warning("Service record deleted.")
+                _safe_rerun()
     else:
         st.info("No service records yet. Log one using the form above.")
 
@@ -14374,6 +14810,14 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
                 entity_type="quotation",
                 entity_id=quotation_id,
             )
+        else:
+            log_activity(
+                conn,
+                event_type="quotation_updated",
+                description=f"{reference_label} updated",
+                entity_type="quotation",
+                entity_id=quotation_id,
+            )
         if status_value == "paid" and status_value != current_status:
             _promote_lead_customer(
                 conn,
@@ -15252,6 +15696,14 @@ def _render_quotation_management(conn):
             ),
         )
         conn.commit()
+        log_activity(
+            conn,
+            event_type="quotation_updated",
+            description=f"Quotation #{selected_detail_id} details updated",
+            entity_type="quotation",
+            entity_id=int(selected_detail_id),
+            user_id=current_user_id(),
+        )
         st.success("Quotation details updated.")
         _safe_rerun()
 
@@ -15309,6 +15761,27 @@ def _render_quotation_management(conn):
         )
         st.warning("Quotation deleted.")
         _safe_rerun()
+
+    if is_admin:
+        with st.expander("Quotation activity log", expanded=False):
+            activity_df = _fetch_entity_activity(conn, ["quotation"], limit=50)
+            if activity_df.empty:
+                st.caption("No quotation activity recorded yet.")
+            else:
+                activity_df = fmt_dates(activity_df, ["created_at"])
+                activity_df = activity_df.rename(
+                    columns={
+                        "created_at": "When",
+                        "actor": "Staff",
+                        "event_type": "Event",
+                        "description": "Details",
+                    }
+                )
+                st.dataframe(
+                    activity_df[["When", "Staff", "Event", "Details"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 
 def advanced_search_page(conn):
@@ -15452,6 +15925,7 @@ def advanced_search_page(conn):
             """
             SELECT service_id, description, service_start_date, service_end_date, service_product_info, status
             FROM services
+            WHERE deleted_at IS NULL
             ORDER BY datetime(COALESCE(service_start_date, service_end_date)) DESC, service_id DESC
             LIMIT 200
             """,
@@ -15476,6 +15950,7 @@ def advanced_search_page(conn):
             """
             SELECT maintenance_id, description, maintenance_start_date, maintenance_end_date, maintenance_product_info, status
             FROM maintenance_records
+            WHERE deleted_at IS NULL
             ORDER BY datetime(COALESCE(maintenance_start_date, maintenance_end_date)) DESC, maintenance_id DESC
             LIMIT 200
             """,
@@ -15931,6 +16406,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         LEFT JOIN delivery_orders d ON d.do_number = m.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
         LEFT JOIN maintenance_documents md ON md.maintenance_id = m.maintenance_id
+        WHERE m.deleted_at IS NULL
         GROUP BY m.maintenance_id
         ORDER BY datetime(COALESCE(m.maintenance_start_date, m.maintenance_date)) DESC, m.maintenance_id DESC
         """,
@@ -15958,30 +16434,32 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             maintenance_df,
             ["maintenance_date", "maintenance_start_date", "maintenance_end_date"],
         )
-        maintenance_df.drop(
+        maintenance_records = maintenance_df.to_dict("records")
+        display_df = maintenance_df.drop(
             columns=["customer_id", "do_customer_id", "created_by"],
-            inplace=True,
             errors="ignore",
         )
-        maintenance_df["maintenance_period"] = maintenance_df.apply(
+        display_df["maintenance_period"] = display_df.apply(
             lambda row: format_period_span(
                 row.get("maintenance_start_date"), row.get("maintenance_end_date")
             ),
             axis=1,
         )
-        maintenance_df["Last update"] = pd.to_datetime(maintenance_df.get("updated_at"), errors="coerce").dt.strftime("%d-%m-%Y %H:%M")
-        maintenance_df.loc[maintenance_df["Last update"].isna(), "Last update"] = None
-        if "status" in maintenance_df.columns:
-            maintenance_df["status"] = maintenance_df["status"].apply(lambda x: clean_text(x) or DEFAULT_SERVICE_STATUS)
-        if "total_amount" in maintenance_df.columns:
-            maintenance_df["maintenance_amount_display"] = maintenance_df["total_amount"].apply(
+        display_df["Last update"] = pd.to_datetime(display_df.get("updated_at"), errors="coerce").dt.strftime("%d-%m-%Y %H:%M")
+        display_df.loc[display_df["Last update"].isna(), "Last update"] = None
+        if "status" in display_df.columns:
+            display_df["status"] = display_df["status"].apply(
+                lambda x: clean_text(x) or DEFAULT_SERVICE_STATUS
+            )
+        if "total_amount" in display_df.columns:
+            display_df["maintenance_amount_display"] = display_df["total_amount"].apply(
                 format_money
             )
-        if "payment_receipt_path" in maintenance_df.columns:
-            maintenance_df["payment_receipt_display"] = maintenance_df[
+        if "payment_receipt_path" in display_df.columns:
+            display_df["payment_receipt_display"] = display_df[
                 "payment_receipt_path"
             ].apply(lambda x: "📎" if clean_text(x) else "")
-        display = maintenance_df.rename(
+        display = display_df.rename(
             columns={
                 "do_number": "DO Serial",
                 "maintenance_date": "Maintenance date",
@@ -16004,7 +16482,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
             use_container_width=True,
         )
 
-        records = maintenance_df.to_dict("records")
+        records = maintenance_records
         st.markdown("#### Update status & remarks")
         options = [int(r["maintenance_id"]) for r in records]
         def maintenance_label(record):
@@ -16165,6 +16643,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                         payment_receipt_path = COALESCE(?, payment_receipt_path),
                         updated_at = datetime('now')
                     WHERE maintenance_id = ?
+                      AND deleted_at IS NULL
                     """,
                     (
                         new_status,
@@ -16256,6 +16735,68 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                 _safe_rerun()
             else:
                 st.info("Select at least one PDF to upload.")
+
+        st.markdown("#### Delete maintenance record")
+        actor_id = current_user_id()
+        is_admin = current_user_is_admin()
+        deletable_df = pd.DataFrame(maintenance_records)
+        if not is_admin and actor_id is not None and not deletable_df.empty:
+            deletable_df = deletable_df[
+                deletable_df["created_by"].apply(
+                    lambda val: int(_coerce_float(val, -1)) == actor_id
+                )
+            ]
+        if deletable_df.empty:
+            st.caption("No maintenance records available for deletion.")
+        else:
+            delete_labels: dict[int, str] = {}
+            for _, row in deletable_df.iterrows():
+                maintenance_id = int(row.get("maintenance_id"))
+                do_ref = clean_text(row.get("do_number")) or "Maintenance"
+                customer_ref = clean_text(row.get("customer")) or "(customer)"
+                period_ref = clean_text(row.get("maintenance_period"))
+                label_parts = [do_ref, customer_ref]
+                if period_ref:
+                    label_parts.append(period_ref)
+                delete_labels[maintenance_id] = " • ".join(label_parts)
+            delete_options = list(delete_labels.keys())
+            selected_delete_id = st.selectbox(
+                "Select a maintenance entry to delete",
+                delete_options,
+                format_func=lambda val: delete_labels.get(val, f"Maintenance #{val}"),
+                key="maintenance_delete_select",
+            )
+            confirm_delete = st.checkbox(
+                "I understand this maintenance entry will be removed from active views.",
+                key="maintenance_delete_confirm",
+            )
+            if st.button(
+                "Delete maintenance record",
+                type="secondary",
+                disabled=not confirm_delete,
+                key="maintenance_delete_button",
+            ):
+                conn.execute(
+                    """
+                    UPDATE maintenance_records
+                    SET deleted_at=datetime('now'),
+                        deleted_by=?
+                    WHERE maintenance_id=?
+                      AND deleted_at IS NULL
+                    """,
+                    (actor_id, selected_delete_id),
+                )
+                conn.commit()
+                log_activity(
+                    conn,
+                    event_type="maintenance_deleted",
+                    description=f"Maintenance #{selected_delete_id} deleted",
+                    entity_type="maintenance",
+                    entity_id=int(selected_delete_id),
+                    user_id=actor_id,
+                )
+                st.warning("Maintenance record deleted.")
+                _safe_rerun()
     else:
         st.info("No maintenance records yet. Log one using the form above.")
 
@@ -17210,7 +17751,8 @@ def customer_summary_page(conn):
         LEFT JOIN delivery_orders d ON d.do_number = s.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
         LEFT JOIN service_documents sd ON sd.service_id = s.service_id
-        WHERE COALESCE(s.customer_id, d.customer_id) IN ({placeholders})
+        WHERE s.deleted_at IS NULL
+          AND COALESCE(s.customer_id, d.customer_id) IN ({placeholders})
         GROUP BY s.service_id
         ORDER BY datetime(COALESCE(s.service_start_date, s.service_date)) DESC, s.service_id DESC
         """,
@@ -17244,7 +17786,8 @@ def customer_summary_page(conn):
         LEFT JOIN delivery_orders d ON d.do_number = m.do_number
         LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
         LEFT JOIN maintenance_documents md ON md.maintenance_id = m.maintenance_id
-        WHERE COALESCE(m.customer_id, d.customer_id) IN ({placeholders})
+        WHERE m.deleted_at IS NULL
+          AND COALESCE(m.customer_id, d.customer_id) IN ({placeholders})
         GROUP BY m.maintenance_id
         ORDER BY datetime(COALESCE(m.maintenance_start_date, m.maintenance_date)) DESC, m.maintenance_id DESC
         """,
@@ -19694,6 +20237,7 @@ def _sync_report_payment_records(
             SELECT service_id
             FROM services
             WHERE report_id=? AND report_row_index=?
+              AND deleted_at IS NULL
             LIMIT 1
             """,
             (int(report_id), int(idx)),
@@ -19715,6 +20259,7 @@ def _sync_report_payment_records(
                     bill_amount=COALESCE(?, bill_amount),
                     updated_at=datetime('now')
                 WHERE service_id=?
+                  AND deleted_at IS NULL
                 """,
                 (
                     customer_id,
