@@ -7938,10 +7938,44 @@ def dashboard(conn):
     if is_admin:
         _render_admin_record_history(conn)
 
+        st.markdown(
+            """
+            <style>
+            @media (max-width: 768px) {
+              [data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap;
+              }
+              [data-testid="stHorizontalBlock"] > div {
+                flex: 1 1 100% !important;
+                min-width: 100% !important;
+              }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("#### Team quotations (downloadable)")
+        quote_search = st.text_input(
+            "Search quotations",
+            key="admin_quote_search",
+            help="Search by reference, customer, or salesperson.",
+        )
+        quote_params: list[object] = []
+        quote_filters = ["q.deleted_at IS NULL"]
+        if quote_search:
+            query_value = f"%{quote_search.strip()}%"
+            quote_filters.append(
+                "("
+                "q.reference LIKE ? OR q.customer_company LIKE ? OR q.salesperson_name LIKE ? OR u.username LIKE ?"
+                ")"
+            )
+            quote_params.extend([query_value, query_value, query_value, query_value])
+        quote_where = " AND ".join(quote_filters)
+        quote_limit = 50 if quote_search else 20
         staff_quotes = df_query(
             conn,
             dedent(
-                """
+                f"""
                 SELECT q.quotation_id,
                        q.reference,
                        q.customer_company,
@@ -7953,15 +7987,17 @@ def dashboard(conn):
                        u.username
                 FROM quotations q
                 LEFT JOIN users u ON u.user_id = q.created_by
-                WHERE q.deleted_at IS NULL
+                WHERE {quote_where}
                 ORDER BY datetime(q.quote_date) DESC, q.quotation_id DESC
-                LIMIT 8
+                LIMIT {quote_limit}
                 """
             ),
+            tuple(quote_params),
         )
         if not staff_quotes.empty:
             staff_quotes = fmt_dates(staff_quotes, ["quote_date"])
-            st.markdown("#### Team quotations (downloadable)")
+            if not quote_search:
+                st.caption("Showing the latest 20 quotations. Use search to find older records.")
             with st.container():
                 st.markdown(
                     "<div style='max-height: 320px; overflow-y: auto;'>",
@@ -8069,6 +8105,8 @@ def dashboard(conn):
                     else:
                         cols[3].caption("File missing")
                 st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.info("No quotations found for the current filters.")
 
     quote_scope, quote_params = _quotation_scope_filter()
     quote_clause = quote_scope.replace("WHERE", "WHERE", 1)
@@ -8308,10 +8346,23 @@ def dashboard(conn):
         if backup_status:
             backup_label = backup_status.get("last_backup_at") or "Unknown time"
             backup_file = backup_status.get("last_backup_file") or "unknown file"
-            st.caption(
+            backup_lines = [
                 f"Last automatic backup: {backup_label} • {backup_file} "
                 f"(stored in {backup_status.get('backup_dir')})"
-            )
+            ]
+            mirror_dir = backup_status.get("mirror_dir")
+            if mirror_dir:
+                backup_lines.append(f"Backup mirror: {mirror_dir}")
+            mirror_error = backup_status.get("mirror_error")
+            if mirror_error:
+                backup_lines.append(f"Backup mirror error: {mirror_error}")
+            st.caption(" • ".join(backup_lines))
+            if not mirror_dir:
+                st.info(
+                    "Tip: set PS_BACKUP_MIRROR_DIR to store automatic backups on a separate Linode volume "
+                    "so older archives (including staff/users database data and uploads) stay available after redeploys.",
+                    icon="💾",
+                )
         if st.session_state.get("auto_backup_error"):
             st.warning(
                 f"Automatic backup failed: {st.session_state['auto_backup_error']}"
@@ -11125,6 +11176,22 @@ def render_operations_document_uploader(
     key_prefix: str,
 ) -> None:
     st.markdown("### Operations document uploads")
+    st.markdown(
+        """
+        <style>
+        @media (max-width: 768px) {
+          [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap;
+          }
+          [data-testid="stHorizontalBlock"] > div {
+            flex: 1 1 100% !important;
+            min-width: 100% !important;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     customer_options, customer_labels, _, _ = fetch_customer_choices(conn, only_complete=False)
     customer_choices = [cid for cid in customer_options if cid is not None]
     if not customer_choices:
@@ -11369,34 +11436,106 @@ def render_operations_document_uploader(
         """,
         (int(selected_customer),),
     )
+    if not docs_df.empty:
+        docs_df = docs_df.drop_duplicates(
+            subset=["file_path", "doc_type", "original_name"], keep="first"
+        )
+    docs_df_all = docs_df.copy()
     st.markdown("#### Existing documents")
     if docs_df.empty:
         st.caption("No documents uploaded for this customer yet.")
     else:
-        for _, row in docs_df.iterrows():
+        doc_type_filters = [
+            ("All", "All documents"),
+            ("Delivery order", "Delivery order (DO)"),
+            ("Work done", "Work done (WO)"),
+            ("Service", "Service"),
+            ("Maintenance", "Maintenance"),
+            ("Other", "Other"),
+        ]
+        type_label_map = {key: label for key, label in doc_type_filters}
+        with st.sidebar:
+            selected_doc_filter = st.radio(
+                "Operations documents",
+                [key for key, _ in doc_type_filters],
+                format_func=lambda key: type_label_map.get(key, key),
+                key=f"{key_prefix}_doc_filter",
+            )
+        scoped_docs = docs_df.copy()
+        if selected_doc_filter != "All":
+            scoped_docs = scoped_docs[
+                scoped_docs["doc_type"].fillna("") == selected_doc_filter
+            ]
+        scoped_docs = scoped_docs.sort_values(
+            by=["uploaded_at", "document_id"], ascending=[False, False]
+        )
+        st.caption("Showing the latest 20 uploads for the selected category.")
+        header_cols = st.columns([0.55, 0.25, 0.2])
+        header_cols[0].markdown("**Document**")
+        header_cols[1].markdown("**Uploaded**")
+        header_cols[2].markdown("**Download**")
+        latest_docs = scoped_docs.head(20)
+        for _, row in latest_docs.iterrows():
             path = resolve_upload_path(row.get("file_path"))
             label = clean_text(row.get("original_name")) or "(document)"
             doc_type = clean_text(row.get("doc_type")) or "Document"
             uploaded_at = pd.to_datetime(row.get("uploaded_at"), errors="coerce")
-            suffix = f" ({uploaded_at.strftime('%d-%m-%Y')})" if pd.notna(uploaded_at) else ""
+            uploaded_label = uploaded_at.strftime("%d-%m-%Y") if pd.notna(uploaded_at) else "—"
+            row_cols = st.columns([0.55, 0.25, 0.2])
+            row_cols[0].write(f"{doc_type}: {label}")
+            row_cols[1].write(uploaded_label)
             if path and path.exists():
-                st.download_button(
-                    f"{doc_type}: {label}{suffix}",
+                row_cols[2].download_button(
+                    "Download",
                     data=path.read_bytes(),
                     file_name=path.name,
                     key=f"{key_prefix}_download_{int(row['document_id'])}",
                 )
             else:
-                st.caption(f"{doc_type}: {label}{suffix} (file missing)")
+                row_cols[2].caption("Missing")
 
         st.markdown("#### Edit or delete an uploaded document")
-        doc_records = docs_df.to_dict("records")
+        search_query = st.text_input(
+            "Search documents (name or type)",
+            key=f"{key_prefix}_doc_search",
+        )
+        edit_scope = docs_df_all.copy()
+        if selected_doc_filter != "All":
+            edit_scope = edit_scope[
+                edit_scope["doc_type"].fillna("") == selected_doc_filter
+            ]
+        if search_query:
+            query_value = search_query.strip().lower()
+            edit_scope = edit_scope[
+                edit_scope.apply(
+                    lambda row: query_value
+                    in " ".join(
+                        [
+                            clean_text(row.get("doc_type")),
+                            clean_text(row.get("original_name")),
+                            clean_text(row.get("file_path")),
+                        ]
+                    ).lower(),
+                    axis=1,
+                )
+            ]
+        else:
+            edit_scope = edit_scope.sort_values(
+                by=["uploaded_at", "document_id"], ascending=[False, False]
+            ).head(20)
+        doc_records = edit_scope.to_dict("records")
+        if not doc_records:
+            st.caption("No documents match that search.")
+            return
         doc_labels = {
             int(row["document_id"]): " • ".join(
                 part
                 for part in [
                     clean_text(row.get("doc_type")) or "Document",
                     clean_text(row.get("original_name")) or "(file)",
+                    pd.to_datetime(row.get("uploaded_at"), errors="coerce").strftime("%d-%m-%Y")
+                    if pd.notna(pd.to_datetime(row.get("uploaded_at"), errors="coerce"))
+                    else "",
                 ]
                 if part
             )
@@ -11466,11 +11605,12 @@ def render_operations_document_uploader(
             selected_doc_type = clean_text(selected_doc.get("doc_type")) or "Other"
             if selected_doc_type not in doc_type_options:
                 selected_doc_type = "Other"
-            doc_type_choice = st.selectbox(
+            doc_type_choice = selected_doc_type
+            st.text_input(
                 "Document type",
-                doc_type_options,
-                index=doc_type_options.index(selected_doc_type),
+                value=selected_doc_type,
                 key=f"{key_prefix}_doc_edit_type",
+                disabled=True,
             )
             replace_doc_file = st.file_uploader(
                 "Replace document (optional)",
@@ -15220,7 +15360,12 @@ def _persist_quotation_pdf(
         return None
 
 
-def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dict[str, list[int]]:
+def _update_quotation_records(
+    conn,
+    updates: Iterable[dict[str, object]],
+    *,
+    allow_locked: bool = False,
+) -> dict[str, list[int]]:
     updated: list[int] = []
     locked: list[int] = []
     for entry in updates:
@@ -15253,7 +15398,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
             customer_contact,
         ) = row
         current_status = clean_text(current_status) or "pending"
-        if current_status in {"paid", "rejected"}:
+        if current_status in {"paid", "rejected"} and not allow_locked:
             locked.append(quotation_id)
             continue
         status_value = clean_text(entry.get("status")) or current_status
@@ -15275,7 +15420,7 @@ def _update_quotation_records(conn, updates: Iterable[dict[str, object]]) -> dic
         receipt_path = clean_text(entry.get("payment_receipt_path")) or clean_text(
             current_receipt_path
         )
-        if status_value == "paid" and not receipt_path:
+        if status_value == "paid" and not receipt_path and not allow_locked:
             locked.append(quotation_id)
             continue
         conn.execute(
@@ -16047,7 +16192,11 @@ def _render_quotation_management(conn):
         sanitized_records: list[dict[str, object]] = []
         for record in edited_records:
             sanitized_records.append(dict(record))
-        result = _update_quotation_records(conn, sanitized_records)
+        result = _update_quotation_records(
+            conn,
+            sanitized_records,
+            allow_locked=is_admin,
+        )
         updated_count = len(result.get("updated", []))
         locked_count = len(result.get("locked", []))
         if updated_count:
@@ -18501,6 +18650,11 @@ def customer_summary_page(conn):
         ids,
     )
     if not customer_docs.empty:
+        customer_docs = customer_docs.drop_duplicates(
+            subset=["customer_id", "doc_type", "file_path", "original_name"],
+            keep="first",
+        )
+    if not customer_docs.empty:
         for _, row in customer_docs.iterrows():
             path = resolve_upload_path(row.get("file_path"))
             if not path or not path.exists():
@@ -18813,6 +18967,33 @@ def customer_summary_page(conn):
                             "key": f"quotation_receipt_{quote_id}",
                         }
                     )
+
+    deduped_documents: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for entry in documents:
+        path_value = entry.get("path")
+        path_key = ""
+        if isinstance(path_value, Path):
+            try:
+                path_key = str(path_value.resolve())
+            except OSError:
+                path_key = str(path_value)
+        elif path_value:
+            path_key = str(path_value)
+        dedupe_key = (
+            clean_text(entry.get("source")) or "",
+            clean_text(entry.get("reference")) or "",
+            clean_text(entry.get("display")) or "",
+            path_key,
+        )
+        existing = deduped_documents.get(dedupe_key)
+        if existing is None:
+            deduped_documents[dedupe_key] = entry
+            continue
+        existing_uploaded = existing.get("uploaded")
+        new_uploaded = entry.get("uploaded")
+        if not existing_uploaded and new_uploaded:
+            deduped_documents[dedupe_key] = entry
+    documents = list(deduped_documents.values())
 
     documents.sort(key=lambda d: (d["source"], d.get("reference") or "", d.get("display") or ""))
 
@@ -21257,20 +21438,7 @@ def reports_page(conn):
         month_start: date,
         month_end: date,
     ) -> bool:
-        template_key = _normalize_report_template(row.get("report_template"))
-        if template_key in {"service", "sales", "follow_up"}:
-            return True
-        period_key = clean_text(row.get("period_type")) or ""
-        period_key = period_key.lower()
-        row_start = _date_or(row.get("period_start"), today)
-        row_end = _date_or(row.get("period_end"), row_start)
-        if period_key == "daily":
-            return row_start == today == row_end
-        if period_key == "weekly":
-            return True
-        if period_key == "monthly":
-            return True
-        return False
+        return True
 
 
     owner_reports = df_query(
