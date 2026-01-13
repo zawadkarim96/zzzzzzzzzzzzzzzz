@@ -10306,6 +10306,11 @@ def _render_doc_detail_inputs(
             "Service description",
             key=f"{key_prefix}_service_description",
         )
+        details["status"] = st.selectbox(
+            "Progress status",
+            SERVICE_STATUS_OPTIONS,
+            key=f"{key_prefix}_service_status",
+        )
         details["remarks"] = st.text_area(
             "Remarks",
             key=f"{key_prefix}_service_remarks",
@@ -10372,6 +10377,11 @@ def _render_doc_detail_inputs(
         details["description"] = st.text_area(
             "Maintenance description",
             key=f"{key_prefix}_maintenance_description",
+        )
+        details["status"] = st.selectbox(
+            "Progress status",
+            SERVICE_STATUS_OPTIONS,
+            key=f"{key_prefix}_maintenance_status",
         )
         details["remarks"] = st.text_area(
             "Remarks",
@@ -10471,6 +10481,7 @@ def _clear_operations_upload_state(
                 f"{details_key_prefix}_service_items_editor",
                 f"{details_key_prefix}_service_date",
                 f"{details_key_prefix}_service_description",
+                f"{details_key_prefix}_service_status",
                 f"{details_key_prefix}_service_remarks",
                 f"{details_key_prefix}_service_payment_status",
                 f"{details_key_prefix}_service_person_in_charge",
@@ -10484,6 +10495,7 @@ def _clear_operations_upload_state(
                 f"{details_key_prefix}_maintenance_items_editor",
                 f"{details_key_prefix}_maintenance_date",
                 f"{details_key_prefix}_maintenance_description",
+                f"{details_key_prefix}_maintenance_status",
                 f"{details_key_prefix}_maintenance_remarks",
                 f"{details_key_prefix}_maintenance_payment_status",
                 f"{details_key_prefix}_maintenance_person_in_charge",
@@ -10756,7 +10768,7 @@ def _save_customer_document_upload(
                 clean_text(details.get("description")),
                 remarks,
                 product_info,
-                DEFAULT_SERVICE_STATUS,
+                clean_text(details.get("status")) or DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
                 total_amount if total_amount else None,
@@ -10800,7 +10812,7 @@ def _save_customer_document_upload(
                 clean_text(details.get("description")),
                 remarks,
                 product_info,
-                DEFAULT_SERVICE_STATUS,
+                clean_text(details.get("status")) or DEFAULT_SERVICE_STATUS,
                 details.get("payment_status") or "pending",
                 receipt_path,
                 total_amount if total_amount else None,
@@ -11345,7 +11357,7 @@ def render_operations_document_uploader(
     docs_df = df_query(
         conn,
         """
-        SELECT document_id, doc_type, file_path, original_name, uploaded_at
+        SELECT document_id, doc_type, file_path, original_name, uploaded_at, uploaded_by
         FROM customer_documents
         WHERE customer_id=?
         ORDER BY datetime(uploaded_at) DESC, document_id DESC
@@ -11372,10 +11384,167 @@ def render_operations_document_uploader(
             else:
                 st.caption(f"{doc_type}: {label}{suffix} (file missing)")
 
+        st.markdown("#### Edit or delete an uploaded document")
+        doc_records = docs_df.to_dict("records")
+        doc_labels = {
+            int(row["document_id"]): " • ".join(
+                part
+                for part in [
+                    clean_text(row.get("doc_type")) or "Document",
+                    clean_text(row.get("original_name")) or "(file)",
+                ]
+                if part
+            )
+            for row in doc_records
+        }
+        doc_choices = list(doc_labels.keys())
+        selected_doc_id = st.selectbox(
+            "Select a document",
+            doc_choices,
+            format_func=lambda rid: doc_labels.get(rid, f"Document #{rid}"),
+            key=f"{key_prefix}_doc_edit_select",
+        )
+        selected_doc = next(
+            row for row in doc_records if int(row["document_id"]) == int(selected_doc_id)
+        )
+        existing_doc_path = resolve_upload_path(selected_doc.get("file_path"))
+        if existing_doc_path and existing_doc_path.exists():
+            st.download_button(
+                "Download current document",
+                data=existing_doc_path.read_bytes(),
+                file_name=existing_doc_path.name,
+                key=f"{key_prefix}_doc_download_{int(selected_doc_id)}",
+            )
+        actor_id = current_user_id()
+        is_admin = current_user_is_admin()
+        can_edit = is_admin or (
+            actor_id is not None
+            and int_or_none(selected_doc.get("uploaded_by")) == int(actor_id)
+        )
+        with st.form(f"{key_prefix}_doc_edit_form"):
+            doc_type_options = ["Delivery order", "Work done", "Service", "Maintenance", "Other"]
+            selected_doc_type = clean_text(selected_doc.get("doc_type")) or "Other"
+            if selected_doc_type not in doc_type_options:
+                selected_doc_type = "Other"
+            doc_type_choice = st.selectbox(
+                "Document type",
+                doc_type_options,
+                index=doc_type_options.index(selected_doc_type),
+                key=f"{key_prefix}_doc_edit_type",
+            )
+            replace_doc_file = st.file_uploader(
+                "Replace document (optional)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_doc_edit_file",
+            )
+            save_doc_changes = st.form_submit_button(
+                "Save document changes",
+                type="primary",
+                disabled=not can_edit,
+            )
+
+        if save_doc_changes:
+            if not can_edit:
+                st.error("Only admins or the original uploader can edit this document.")
+                return
+            stored_path = clean_text(selected_doc.get("file_path"))
+            original_name = clean_text(selected_doc.get("original_name"))
+            if replace_doc_file is not None:
+                doc_dir_map = {
+                    "Delivery order": DELIVERY_ORDER_DIR,
+                    "Work done": DELIVERY_ORDER_DIR,
+                    "Service": SERVICE_DOCS_DIR,
+                    "Maintenance": MAINTENANCE_DOCS_DIR,
+                    "Other": OPERATIONS_OTHER_DIR,
+                }
+                target_dir = doc_dir_map.get(doc_type_choice, CUSTOMER_DOCS_DIR)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                doc_type_slug = (
+                    _sanitize_path_component(doc_type_choice.lower().replace(" ", "_"))
+                    or "document"
+                )
+                safe_original = Path(replace_doc_file.name or "document.pdf").name
+                filename = f"{doc_type_slug}_{int(selected_customer)}_{safe_original}"
+                saved_path = save_uploaded_file(
+                    replace_doc_file,
+                    target_dir,
+                    filename=filename,
+                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                    default_extension=".pdf",
+                )
+                if not saved_path:
+                    st.error("Unable to save the replacement file.")
+                    return
+                try:
+                    stored_path = str(saved_path.relative_to(BASE_DIR))
+                except ValueError:
+                    stored_path = str(saved_path)
+                original_name = safe_original
+            conn.execute(
+                """
+                UPDATE customer_documents
+                SET doc_type=?,
+                    file_path=?,
+                    original_name=?
+                WHERE document_id=?
+                """,
+                (
+                    doc_type_choice,
+                    stored_path,
+                    original_name,
+                    int(selected_doc_id),
+                ),
+            )
+            conn.commit()
+            log_activity(
+                conn,
+                event_type="customer_document_updated",
+                description=f"Document #{int(selected_doc_id)} updated",
+                entity_type="customer_document",
+                entity_id=int(selected_doc_id),
+                user_id=actor_id,
+            )
+            st.success("Document updated.")
+            _safe_rerun()
+
+        st.markdown("#### Delete document")
+        confirm_delete = st.checkbox(
+            "I understand this document will be deleted.",
+            key=f"{key_prefix}_doc_delete_confirm",
+        )
+        if st.button(
+            "Delete document",
+            type="secondary",
+            disabled=not (confirm_delete and can_edit),
+            key=f"{key_prefix}_doc_delete_button",
+        ):
+            if not can_edit:
+                st.error("Only admins or the original uploader can delete this document.")
+                return
+            delete_path = resolve_upload_path(selected_doc.get("file_path"))
+            conn.execute(
+                "DELETE FROM customer_documents WHERE document_id=?",
+                (int(selected_doc_id),),
+            )
+            conn.commit()
+            if delete_path and delete_path.exists():
+                with contextlib.suppress(OSError):
+                    delete_path.unlink()
+            log_activity(
+                conn,
+                event_type="customer_document_deleted",
+                description=f"Document #{int(selected_doc_id)} deleted",
+                entity_type="customer_document",
+                entity_id=int(selected_doc_id),
+                user_id=actor_id,
+            )
+            st.warning("Document deleted.")
+            _safe_rerun()
+
     other_df = df_query(
         conn,
         """
-        SELECT document_id, description, items_payload, file_path, original_name, uploaded_at
+        SELECT document_id, description, items_payload, file_path, original_name, uploaded_at, uploaded_by
         FROM operations_other_documents
         WHERE customer_id=?
           AND deleted_at IS NULL
@@ -11407,6 +11576,196 @@ def render_operations_document_uploader(
                         file_name=path.name,
                         key=f"{key_prefix}_other_download_{int(row['document_id'])}",
                     )
+        st.markdown("#### Edit or delete other uploads")
+        other_records = other_df.to_dict("records")
+        other_labels = {
+            int(row["document_id"]): " • ".join(
+                part
+                for part in [
+                    clean_text(row.get("description")) or f"Other #{int(row['document_id'])}",
+                    pd.to_datetime(row.get("uploaded_at"), errors="coerce").strftime("%d-%m-%Y")
+                    if pd.notna(pd.to_datetime(row.get("uploaded_at"), errors="coerce"))
+                    else "",
+                ]
+                if part
+            )
+            for row in other_records
+        }
+        other_choices = list(other_labels.keys())
+        selected_other_id = st.selectbox(
+            "Select an other upload",
+            other_choices,
+            format_func=lambda rid: other_labels.get(rid, f"Other #{rid}"),
+            key=f"{key_prefix}_other_edit_select_inline",
+        )
+        selected_other = next(
+            row for row in other_records if int(row["document_id"]) == int(selected_other_id)
+        )
+        existing_other_path = resolve_upload_path(selected_other.get("file_path"))
+        if existing_other_path and existing_other_path.exists():
+            st.download_button(
+                "Download current other document",
+                data=existing_other_path.read_bytes(),
+                file_name=existing_other_path.name,
+                key=f"{key_prefix}_other_download_edit_{int(selected_other_id)}",
+            )
+        existing_items_payload = clean_text(selected_other.get("items_payload"))
+        try:
+            existing_items = json.loads(existing_items_payload) if existing_items_payload else []
+        except (TypeError, ValueError):
+            existing_items = []
+        if not isinstance(existing_items, list):
+            existing_items = []
+        if not existing_items:
+            existing_items = _default_simple_items()
+        items_df = pd.DataFrame(existing_items)
+        for col in ["description", "quantity", "unit_price", "total"]:
+            if col not in items_df.columns:
+                items_df[col] = 0.0 if col != "description" else ""
+        items_df["total"] = items_df.apply(
+            lambda row: max(
+                _coerce_float(row.get("quantity"), 0.0)
+                * _coerce_float(row.get("unit_price"), 0.0),
+                0.0,
+            ),
+            axis=1,
+        )
+        actor_id = current_user_id()
+        is_admin = current_user_is_admin()
+        can_edit = is_admin or (
+            actor_id is not None
+            and int_or_none(selected_other.get("uploaded_by")) == int(actor_id)
+        )
+        with st.form(f"{key_prefix}_other_edit_form_inline"):
+            description_input = st.text_area(
+                "Description",
+                value=clean_text(selected_other.get("description")) or "",
+                key=f"{key_prefix}_other_edit_desc_inline",
+            )
+            edited_items = st.data_editor(
+                items_df[["description", "quantity", "unit_price"]],
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key=f"{key_prefix}_other_edit_items_inline",
+                column_config={
+                    "description": st.column_config.TextColumn("Item"),
+                    "quantity": st.column_config.NumberColumn(
+                        "Qty", min_value=0.0, step=1.0, format="%d"
+                    ),
+                    "unit_price": st.column_config.NumberColumn(
+                        "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                    ),
+                },
+            )
+            replace_file = st.file_uploader(
+                "Replace other document (optional)",
+                type=["pdf", "png", "jpg", "jpeg", "webp"],
+                key=f"{key_prefix}_other_edit_file_inline",
+            )
+            save_changes = st.form_submit_button(
+                "Save other upload",
+                type="primary",
+                disabled=not can_edit,
+            )
+
+        if save_changes:
+            if not can_edit:
+                st.error("Only admins or the original uploader can edit this record.")
+                return
+            items_records = (
+                edited_items.to_dict("records")
+                if isinstance(edited_items, pd.DataFrame)
+                else []
+            )
+            cleaned_items, _ = normalize_simple_items(items_records)
+            items_payload = json.dumps(cleaned_items, ensure_ascii=False) if cleaned_items else None
+            stored_path = clean_text(selected_other.get("file_path"))
+            original_name = clean_text(selected_other.get("original_name"))
+            if replace_file is not None:
+                target_dir = OPERATIONS_OTHER_DIR
+                target_dir.mkdir(parents=True, exist_ok=True)
+                safe_original = Path(replace_file.name or "other_document.pdf").name
+                filename = f"other_{int(selected_customer)}_{safe_original}"
+                saved_path = save_uploaded_file(
+                    replace_file,
+                    target_dir,
+                    filename=filename,
+                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
+                    default_extension=".pdf",
+                )
+                if saved_path:
+                    try:
+                        stored_path = str(saved_path.relative_to(BASE_DIR))
+                    except ValueError:
+                        stored_path = str(saved_path)
+                    original_name = safe_original
+            conn.execute(
+                """
+                UPDATE operations_other_documents
+                SET description=?,
+                    items_payload=?,
+                    file_path=?,
+                    original_name=?,
+                    updated_at=datetime('now')
+                WHERE document_id=?
+                  AND deleted_at IS NULL
+                """,
+                (
+                    clean_text(description_input),
+                    items_payload,
+                    stored_path,
+                    original_name,
+                    int(selected_other_id),
+                ),
+            )
+            conn.commit()
+            log_activity(
+                conn,
+                event_type="operations_other_updated",
+                description=f"Other record #{int(selected_other_id)} updated",
+                entity_type="operations_other",
+                entity_id=int(selected_other_id),
+                user_id=actor_id,
+            )
+            st.success("Other upload updated.")
+            _safe_rerun()
+
+        st.markdown("#### Delete other upload")
+        confirm_delete = st.checkbox(
+            "I understand this record will be removed from active views.",
+            key=f"{key_prefix}_other_delete_confirm_inline",
+        )
+        if st.button(
+            "Delete other upload",
+            type="secondary",
+            disabled=not (confirm_delete and can_edit),
+            key=f"{key_prefix}_other_delete_button_inline",
+        ):
+            if not can_edit:
+                st.error("Only admins or the original uploader can delete this record.")
+                return
+            conn.execute(
+                """
+                UPDATE operations_other_documents
+                SET deleted_at=datetime('now'),
+                    deleted_by=?
+                WHERE document_id=?
+                  AND deleted_at IS NULL
+                """,
+                (actor_id, int(selected_other_id)),
+            )
+            conn.commit()
+            log_activity(
+                conn,
+                event_type="operations_other_deleted",
+                description=f"Other record #{int(selected_other_id)} deleted",
+                entity_type="operations_other",
+                entity_id=int(selected_other_id),
+                user_id=actor_id,
+            )
+            st.warning("Other upload deleted.")
+            _safe_rerun()
 
 
 def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
@@ -11707,28 +12066,7 @@ def operations_page(conn):
     st.caption(
         "Review delivery orders, work done, service, maintenance, and other operational records in one place."
     )
-    tabs = st.tabs(
-        [
-            "Uploads",
-            "Delivery orders",
-            "Work done",
-            "Service",
-            "Maintenance",
-            "Others",
-        ]
-    )
-    with tabs[0]:
-        render_operations_document_uploader(conn, key_prefix="operations_page")
-    with tabs[1]:
-        delivery_orders_page(conn, show_heading=False, record_type_label="Delivery order", record_type_key="delivery_order")
-    with tabs[2]:
-        delivery_orders_page(conn, show_heading=False, record_type_label="Work done", record_type_key="work_done")
-    with tabs[3]:
-        _render_service_section(conn, show_heading=False)
-    with tabs[4]:
-        _render_maintenance_section(conn, show_heading=False)
-    with tabs[5]:
-        _render_operations_other_manager(conn, key_prefix="operations_page")
+    render_operations_document_uploader(conn, key_prefix="operations_page")
 
     if current_user_is_admin():
         with st.expander("Admin activity log", expanded=False):
