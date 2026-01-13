@@ -17063,7 +17063,7 @@ def delivery_orders_page(
 def operations_page(conn):
     st.subheader("🧰 Operations")
     st.caption(
-        "Delivery orders, work done, service, and maintenance share one workspace. "
+        "Work done, service, and maintenance share one workspace. "
         "Choose the record type to manage."
     )
     with st.expander("Customer quick edit", expanded=False):
@@ -17084,25 +17084,18 @@ def operations_page(conn):
     st.markdown("---")
     render_operations_document_uploader(conn, key_prefix="operations_uploads")
     st.markdown("---")
-    tabs = st.tabs(["Delivery orders", "Work done", "Service", "Maintenance"])
+    tabs = st.tabs(["Work done", "Service", "Maintenance"])
     with tabs[0]:
-        delivery_orders_page(
-            conn,
-            show_heading=False,
-            record_type_label="Delivery order",
-            record_type_key="delivery_order",
-        )
-    with tabs[1]:
         delivery_orders_page(
             conn,
             show_heading=False,
             record_type_label="Work done",
             record_type_key="work_done",
         )
-    with tabs[2]:
+    with tabs[1]:
         st.markdown("### Service records")
         _render_service_section(conn, show_heading=False)
-    with tabs[3]:
+    with tabs[2]:
         st.markdown("### Maintenance records")
         _render_maintenance_section(conn, show_heading=False)
 
