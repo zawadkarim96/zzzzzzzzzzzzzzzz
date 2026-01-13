@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import hashlib
+import secrets
 import uuid
 import zipfile
 from calendar import monthrange
@@ -951,6 +952,16 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT DEFAULT 'staff',
     created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS user_sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_seen TEXT DEFAULT (datetime('now')),
+    expires_at TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS customers (
     customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
@@ -6455,7 +6466,122 @@ def init_ui():
         unsafe_allow_html=True,
     )
 # ---------- Auth ----------
-def _clear_session_for_logout() -> None:
+SESSION_TOKEN_PARAM = "session"
+SESSION_DURATION_DAYS = int(os.getenv("PS_CRM_SESSION_DAYS", "7"))
+
+
+def _get_session_token_from_url() -> Optional[str]:
+    params = st.experimental_get_query_params()
+    token_values = params.get(SESSION_TOKEN_PARAM, [])
+    return token_values[0] if token_values else None
+
+
+def _set_session_token_in_url(token: Optional[str]) -> None:
+    if token:
+        st.experimental_set_query_params(**{SESSION_TOKEN_PARAM: token})
+    else:
+        st.experimental_set_query_params()
+
+
+def _purge_expired_sessions(conn) -> None:
+    conn.execute(
+        """
+        DELETE FROM user_sessions
+        WHERE expires_at IS NOT NULL
+          AND datetime(expires_at) <= datetime('now')
+        """
+    )
+    conn.commit()
+
+
+def _load_user_from_session(conn, token: str) -> Optional[dict[str, object]]:
+    if not token:
+        return None
+    row = df_query(
+        conn,
+        """
+        SELECT u.user_id, u.username, u.role, u.phone, u.title, u.email, s.expires_at
+        FROM user_sessions s
+        JOIN users u ON u.user_id = s.user_id
+        WHERE s.token = ?
+          AND (s.expires_at IS NULL OR datetime(s.expires_at) > datetime('now'))
+        """,
+        (token,),
+    )
+    if row.empty:
+        return None
+    return {
+        "user_id": int(row.iloc[0]["user_id"]),
+        "username": row.iloc[0]["username"],
+        "role": row.iloc[0]["role"],
+        "phone": clean_text(row.iloc[0].get("phone")),
+        "title": clean_text(row.iloc[0].get("title")),
+        "email": clean_text(row.iloc[0].get("email")),
+    }
+
+
+def _touch_session(conn, token: str) -> None:
+    if not token:
+        return
+    conn.execute(
+        """
+        UPDATE user_sessions
+        SET last_seen=datetime('now'),
+            expires_at=datetime('now', ?)
+        WHERE token=?
+        """,
+        (f"+{SESSION_DURATION_DAYS} days", token),
+    )
+    conn.commit()
+
+
+def _create_session(conn, user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        """
+        INSERT INTO user_sessions (token, user_id, expires_at)
+        VALUES (?, ?, datetime('now', ?))
+        """,
+        (token, int(user_id), f"+{SESSION_DURATION_DAYS} days"),
+    )
+    conn.commit()
+    return token
+
+
+def _restore_user_session(conn) -> None:
+    if st.session_state.get("user"):
+        return
+    token = _get_session_token_from_url()
+    if not token:
+        return
+    user = _load_user_from_session(conn, token)
+    if user:
+        st.session_state.user = user
+        st.session_state["session_token"] = token
+        _touch_session(conn, token)
+    else:
+        _set_session_token_in_url(None)
+
+
+def _ensure_session_token(conn, user: dict[str, object]) -> None:
+    token = st.session_state.get("session_token") or _get_session_token_from_url()
+    if token:
+        st.session_state["session_token"] = token
+        _touch_session(conn, token)
+        return
+    user_id = int(user.get("user_id") or 0)
+    if user_id:
+        new_token = _create_session(conn, user_id)
+        st.session_state["session_token"] = new_token
+        _set_session_token_in_url(new_token)
+
+
+def _clear_session_for_logout(conn) -> None:
+    token = st.session_state.get("session_token") or _get_session_token_from_url()
+    if token:
+        conn.execute("DELETE FROM user_sessions WHERE token = ?", (token,))
+        conn.commit()
+    _set_session_token_in_url(None)
     preserved = {}
     if "theme" in st.session_state:
         preserved["theme"] = st.session_state.get("theme")
@@ -6472,6 +6598,7 @@ def _request_logout() -> None:
 def login_box(conn, *, render_id=None):
     apply_theme_css()
     if st.session_state.user:
+        _ensure_session_token(conn, st.session_state.user)
         st.sidebar.markdown("### Login")
         st.sidebar.success(f"Logged in as {st.session_state.user['username']} ({st.session_state.user['role']})")
         return True
@@ -6601,7 +6728,7 @@ def login_box(conn, *, render_id=None):
             (u,),
         )
         if not row.empty and hashlib.sha256(p.encode("utf-8")).hexdigest() == row.iloc[0]["pass_hash"]:
-            st.session_state.user = {
+            user_payload = {
                 "user_id": int(row.iloc[0]["user_id"]),
                 "username": row.iloc[0]["username"],
                 "role": row.iloc[0]["role"],
@@ -6609,6 +6736,8 @@ def login_box(conn, *, render_id=None):
                 "title": clean_text(row.iloc[0].get("title")),
                 "email": clean_text(row.iloc[0].get("email")),
             }
+            st.session_state.user = user_payload
+            _ensure_session_token(conn, user_payload)
             st.session_state.page = "Dashboard"
             st.session_state.just_logged_in = True
             _safe_rerun()
@@ -16459,17 +16588,6 @@ def delivery_orders_page(
         st.caption(
             f"Estimated total: {format_money(estimated_total) or f'{estimated_total:,.2f}'}"
         )
-        do_file = st.file_uploader(
-            f"Attach {record_label.lower()} (PDF or image)",
-            type=["pdf", "png", "jpg", "jpeg", "webp"],
-            help="Optional supporting document stored alongside the record.",
-            key=f"{record_type_key}_document_upload",
-        )
-        _render_upload_ocr_preview(
-            do_file,
-            key_prefix=f"{record_type_key}_document",
-            label=f"{record_label} document OCR",
-        )
         submit = st.form_submit_button(f"Save {record_label_lower}", type="primary")
 
     if receipt_download and receipt_download_name:
@@ -16524,20 +16642,6 @@ def delivery_orders_page(
                     f"{record_label} {cleaned_number} is locked because it is marked as {existing_status}."
                 )
                 return
-            if do_file is not None:
-                doc_ext = _upload_extension(do_file, default=".pdf")
-                stored_path = save_uploaded_file(
-                    do_file,
-                    DELIVERY_ORDER_DIR,
-                    filename=f"do_{_sanitize_path_component(cleaned_number)}{doc_ext}",
-                    allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                    default_extension=".pdf",
-                )
-                if stored_path:
-                    try:
-                        stored_path = str(stored_path.relative_to(BASE_DIR))
-                    except ValueError:
-                        stored_path = str(stored_path)
             auto_mark_paid = False
             if (
                 status_value == "advanced"
@@ -16788,7 +16892,7 @@ def delivery_orders_page(
 
             do_df["total_amount"] = do_df["total_amount"].apply(_format_total_value)
         st.markdown(f"#### {record_label} records")
-        header_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2, 1.2))
+        header_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2))
         header_cols[0].write(f"**{number_label}**")
         header_cols[1].write("**Customer**")
         header_cols[2].write("**Description**")
@@ -16796,15 +16900,14 @@ def delivery_orders_page(
         header_cols[4].write("**Status**")
         header_cols[5].write("**Attachment**")
         header_cols[6].write("**Receipt**")
-        header_cols[7].write("**Upload doc**")
-        header_cols[8].write("**Upload receipt**")
+        header_cols[7].write("**Upload receipt**")
 
         for _, row in do_df.iterrows():
             do_number = clean_text(row.get("do_number"))
             if not do_number:
                 continue
             row_key = f"{record_type_key}_{do_number}"
-            row_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2, 1.2))
+            row_cols = st.columns((1.2, 1.6, 2.6, 1.0, 0.9, 0.7, 0.7, 1.2))
             row_cols[0].write(do_number)
             row_cols[1].write(clean_text(row.get("customer")) or "(unknown)")
             row_cols[2].write(clean_text(row.get("description")) or "")
@@ -16822,18 +16925,7 @@ def delivery_orders_page(
                 )
             else:
                 row_cols[6].write(clean_text(row.get("Receipt")) or "")
-            upload_doc = row_cols[7].file_uploader(
-                "Upload document",
-                type=["pdf", "png", "jpg", "jpeg", "webp"],
-                label_visibility="collapsed",
-                key=f"do_row_doc_upload_{row_key}",
-            )
-            _render_upload_ocr_preview(
-                upload_doc,
-                key_prefix=f"do_row_doc_upload_{row_key}",
-                label=f"{record_label} row document OCR",
-            )
-            upload_receipt = row_cols[8].file_uploader(
+            upload_receipt = row_cols[7].file_uploader(
                 "Upload receipt",
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 label_visibility="collapsed",
@@ -16849,27 +16941,10 @@ def delivery_orders_page(
                 save_label, type="secondary", key=f"do_row_save_{row_key}"
             )
             if _guard_double_submit(f"do_row_save_{row_key}", save_doc):
-                if upload_doc is None and upload_receipt is None:
-                    st.warning("Select a document or receipt to upload.")
+                if upload_receipt is None:
+                    st.warning("Select a receipt to upload.")
                 else:
                     updates = {}
-                    if upload_doc is not None:
-                        doc_ext = _upload_extension(upload_doc, default=".pdf")
-                        stored_path = save_uploaded_file(
-                            upload_doc,
-                            DELIVERY_ORDER_DIR,
-                            filename=(
-                                f"{record_type_key}_{_sanitize_path_component(do_number)}{doc_ext}"
-                            ),
-                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                            default_extension=".pdf",
-                        )
-                        if stored_path:
-                            try:
-                                stored_path = str(stored_path.relative_to(BASE_DIR))
-                            except ValueError:
-                                stored_path = str(stored_path)
-                            updates["file_path"] = stored_path
                     if upload_receipt is not None:
                         receipt_identifier = _sanitize_path_component(do_number) or "do_receipt"
                         receipt_path = store_payment_receipt(
@@ -21239,9 +21314,6 @@ def reports_page(conn):
 
 # ---------- Main ----------
 def main():
-    if st.session_state.pop("logout_requested", False):
-        _clear_session_for_logout()
-        st.rerun()
     st.session_state["_render_id"] = st.session_state.get("_render_id", 0) + 1
     render_id = st.session_state["_render_id"]
     init_ui()
@@ -21249,6 +21321,10 @@ def main():
     _ensure_quotation_editor_server()
     conn = get_conn()
     init_schema(conn)
+    _purge_expired_sessions(conn)
+    if st.session_state.pop("logout_requested", False):
+        _clear_session_for_logout(conn)
+        st.rerun()
     _, backup_error = ensure_monthly_backup(
         BACKUP_DIR,
         "ps_crm_backup",
@@ -21257,10 +21333,12 @@ def main():
         BACKUP_MIRROR_PATH,
     )
     st.session_state["auto_backup_error"] = backup_error
+    _restore_user_session(conn)
     login_box(conn, render_id=render_id)
     # Auth gate: stop rendering any dashboard/navigation without a user session.
     if not st.session_state.get("user"):
         st.stop()
+    _touch_session(conn, st.session_state.get("session_token"))
 
     if "page" not in st.session_state:
         st.session_state.page = "Dashboard"
