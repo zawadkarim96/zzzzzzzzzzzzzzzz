@@ -11376,6 +11376,11 @@ def render_operations_document_uploader(
                     )
 
 
+def operations_page(conn):
+    st.subheader("🛠️ Operations")
+    render_operations_document_uploader(conn, key_prefix="operations_page")
+
+
 def customers_page(conn):
     st.subheader("👥 Customers")
     feedback = st.session_state.pop("new_customer_feedback", None)
@@ -21264,6 +21269,7 @@ def main():
             "Dashboard",
             "Customers",
             "Quotation",
+            "Operations",
             "Warranties",
             "Advanced Search",
             "Reports",
@@ -21274,6 +21280,7 @@ def main():
             "Dashboard",
             "Customers",
             "Quotation",
+            "Operations",
             "Warranties",
             "Reports",
         ]
@@ -21361,6 +21368,8 @@ def main():
         quotation_page(conn, render_id=render_id)
     elif page == "Customers":
         customers_hub_page(conn)
+    elif page == "Operations":
+        operations_page(conn)
     elif page == "Warranties":
         warranties_page(conn)
     elif page == "Advanced Search":
