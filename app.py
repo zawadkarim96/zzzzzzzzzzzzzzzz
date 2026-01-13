@@ -17060,46 +17060,6 @@ def delivery_orders_page(
         _safe_rerun()
 
 
-def operations_page(conn):
-    st.subheader("🧰 Operations")
-    st.caption(
-        "Work done, service, and maintenance share one workspace. "
-        "Choose the record type to manage."
-    )
-    with st.expander("Customer quick edit", expanded=False):
-        render_customer_quick_edit_section(
-            conn,
-            key_prefix="operations_customers",
-            include_leads=False,
-            show_id=False,
-            enable_pagination=False,
-            limit_rows=20,
-            show_do_code=False,
-            show_duplicate=False,
-            action_icon_only=True,
-            use_popover=True,
-            include_quotation_upload=False,
-            enable_uploads=False,
-        )
-    st.markdown("---")
-    render_operations_document_uploader(conn, key_prefix="operations_uploads")
-    st.markdown("---")
-    tabs = st.tabs(["Work done", "Service", "Maintenance"])
-    with tabs[0]:
-        delivery_orders_page(
-            conn,
-            show_heading=False,
-            record_type_label="Work done",
-            record_type_key="work_done",
-        )
-    with tabs[1]:
-        st.markdown("### Service records")
-        _render_service_section(conn, show_heading=False)
-    with tabs[2]:
-        st.markdown("### Maintenance records")
-        _render_maintenance_section(conn, show_heading=False)
-
-
 def quotation_page(conn, *, render_id: Optional[int] = None):
     st.subheader("🧾 Quotation")
     _render_quotation_section(conn, render_id=render_id)
@@ -21303,7 +21263,6 @@ def main():
         pages = [
             "Dashboard",
             "Customers",
-            "Operations",
             "Quotation",
             "Warranties",
             "Advanced Search",
@@ -21314,7 +21273,6 @@ def main():
         pages = [
             "Dashboard",
             "Customers",
-            "Operations",
             "Quotation",
             "Warranties",
             "Reports",
@@ -21399,8 +21357,6 @@ def main():
 
     if page == "Dashboard":
         dashboard(conn)
-    elif page == "Operations":
-        operations_page(conn)
     elif page == "Quotation":
         quotation_page(conn, render_id=render_id)
     elif page == "Customers":
