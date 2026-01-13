@@ -3775,7 +3775,6 @@ def _reset_new_customer_form_state() -> None:
         "new_customer_remarks",
         "new_customer_amount_spent",
         "new_customer_pdf",
-        "new_customer_do_pdf",
         "new_customer_create_delivery_order",
         "new_customer_create_work_done",
         "new_customer_work_done_number",
@@ -6467,7 +6466,18 @@ def init_ui():
     )
 # ---------- Auth ----------
 SESSION_TOKEN_PARAM = "session"
-SESSION_DURATION_DAYS = int(os.getenv("PS_CRM_SESSION_DAYS", "7"))
+
+
+def _session_duration_days() -> float:
+    raw_value = os.getenv("PS_CRM_SESSION_DAYS", "7")
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return 7.0
+    return parsed if parsed > 0 else 7.0
+
+
+SESSION_DURATION_DAYS = _session_duration_days()
 
 
 def _get_session_token_from_url() -> Optional[str]:
@@ -11529,12 +11539,6 @@ def customers_page(conn):
                     key="new_customer_pdf",
                     help="Upload signed agreements, invoices or other supporting paperwork.",
                 )
-                do_pdf = st.file_uploader(
-                    "Attach Delivery Order (PDF or image)",
-                    type=["pdf", "png", "jpg", "jpeg", "webp"],
-                    key="new_customer_do_pdf",
-                    help="Upload the delivery order so it is linked to this record.",
-                )
                 st.markdown("---")
                 create_cols = st.columns(4)
                 if (
@@ -11795,23 +11799,8 @@ def customers_page(conn):
                             (cid, pid, prod.get("serial"), issue, expiry, remarks_val),
                         )
                     conn.commit()
-                if do_serial and (create_delivery_order or do_pdf is not None):
+                if do_serial and create_delivery_order:
                     stored_path = None
-                    if do_pdf is not None:
-                        safe_name = _sanitize_path_component(do_serial)
-                        doc_ext = _upload_extension(do_pdf, default=".pdf")
-                        stored_path = save_uploaded_file(
-                            do_pdf,
-                            DELIVERY_ORDER_DIR,
-                            filename=f"{safe_name}{doc_ext}",
-                            allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                            default_extension=".pdf",
-                        )
-                        if stored_path:
-                            try:
-                                stored_path = str(stored_path.relative_to(BASE_DIR))
-                            except ValueError:
-                                stored_path = str(stored_path)
                     do_receipt_path = None
                     cur = conn.cursor()
                     existing = cur.execute(
@@ -11927,36 +11916,6 @@ def customers_page(conn):
                             ),
                         )
                         conn.commit()
-                elif do_pdf is not None and not do_serial:
-                    doc_ext = _upload_extension(do_pdf, default=".pdf")
-                    stored_path = save_uploaded_file(
-                        do_pdf,
-                        DELIVERY_ORDER_DIR,
-                        filename=f"customer_{cid}_delivery_order{doc_ext}",
-                        allowed_extensions={".pdf", ".png", ".jpg", ".jpeg", ".webp"},
-                        default_extension=".pdf",
-                    )
-                    if stored_path:
-                        try:
-                            stored_relative = str(stored_path.relative_to(BASE_DIR))
-                        except ValueError:
-                            stored_relative = str(stored_path)
-                        conn.execute(
-                            """
-                            INSERT INTO customer_documents (
-                                customer_id, doc_type, file_path, original_name, uploaded_by
-                            ) VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (
-                                int(cid),
-                                "Delivery order",
-                                stored_relative,
-                                Path(do_pdf.name).name,
-                                current_user_id(),
-                            ),
-                        )
-                        conn.commit()
-
                 if create_work_done and work_done_serial:
                     if not product_items:
                         st.warning(
