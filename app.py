@@ -1403,6 +1403,7 @@ def ensure_schema_upgrades(conn):
     add_column("delivery_orders", "deleted_at", "TEXT")
     add_column("delivery_orders", "deleted_by", "INTEGER")
     add_column("operations_other_documents", "updated_at", "TEXT DEFAULT (datetime('now'))")
+    add_column("operations_other_documents", "updated_by", "INTEGER")
     add_column("operations_other_documents", "deleted_at", "TEXT")
     add_column("operations_other_documents", "deleted_by", "INTEGER")
     add_column("import_history", "amount_spent", "REAL")
@@ -1510,6 +1511,10 @@ def ensure_schema_upgrades(conn):
             original_name TEXT,
             uploaded_by INTEGER,
             uploaded_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            updated_by INTEGER,
+            deleted_at TEXT,
+            deleted_by INTEGER,
             FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE,
             FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
         )
@@ -11421,6 +11426,41 @@ def render_operations_document_uploader(
             actor_id is not None
             and int_or_none(selected_doc.get("uploaded_by")) == int(actor_id)
         )
+        delivery_record = None
+        delivery_items_df = None
+        delivery_doc_type = clean_text(selected_doc.get("doc_type"))
+        if delivery_doc_type in {"Delivery order", "Work done"}:
+            record_type = "work_done" if delivery_doc_type == "Work done" else "delivery_order"
+            delivery_df = df_query(
+                conn,
+                """
+                SELECT do_number, description, remarks, sales_person, status, items_payload, record_type
+                FROM delivery_orders
+                WHERE file_path=?
+                  AND record_type=?
+                  AND deleted_at IS NULL
+                """,
+                (clean_text(selected_doc.get("file_path")), record_type),
+            )
+            if not delivery_df.empty:
+                delivery_record = delivery_df.iloc[0].to_dict()
+                delivery_items = parse_delivery_items_payload(delivery_record.get("items_payload"))
+                if not delivery_items:
+                    delivery_items = _default_simple_items()
+                delivery_items_df = pd.DataFrame(delivery_items)
+                for col in ["description", "quantity", "unit_price", "total"]:
+                    if col not in delivery_items_df.columns:
+                        delivery_items_df[col] = 0.0 if col != "description" else ""
+                delivery_items_df["total"] = delivery_items_df.apply(
+                    lambda row: max(
+                        _coerce_float(row.get("quantity"), 0.0)
+                        * _coerce_float(row.get("unit_price"), 0.0),
+                        0.0,
+                    ),
+                    axis=1,
+                )
+            else:
+                st.info("No delivery/work done details found for this upload yet.")
         with st.form(f"{key_prefix}_doc_edit_form"):
             doc_type_options = ["Delivery order", "Work done", "Service", "Maintenance", "Other"]
             selected_doc_type = clean_text(selected_doc.get("doc_type")) or "Other"
@@ -11437,6 +11477,60 @@ def render_operations_document_uploader(
                 type=["pdf", "png", "jpg", "jpeg", "webp"],
                 key=f"{key_prefix}_doc_edit_file",
             )
+            delivery_description_input = None
+            delivery_remarks_input = None
+            delivery_status_choice = None
+            delivery_sales_person = None
+            edited_delivery_items = None
+            if doc_type_choice in {"Delivery order", "Work done"} and delivery_record:
+                st.markdown("**Edit delivery/work done details**")
+                st.text_input(
+                    "Document number",
+                    value=clean_text(delivery_record.get("do_number")),
+                    disabled=True,
+                    key=f"{key_prefix}_doc_edit_do_number",
+                )
+                current_status = normalize_delivery_status(delivery_record.get("status"))
+                if current_status not in DELIVERY_STATUS_OPTIONS:
+                    current_status = DELIVERY_STATUS_OPTIONS[0]
+                delivery_status_choice = st.selectbox(
+                    "Status",
+                    options=DELIVERY_STATUS_OPTIONS,
+                    index=DELIVERY_STATUS_OPTIONS.index(current_status),
+                    key=f"{key_prefix}_doc_edit_status",
+                    format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
+                )
+                delivery_sales_person = st.text_input(
+                    "Person in charge",
+                    value=clean_text(delivery_record.get("sales_person")),
+                    key=f"{key_prefix}_doc_edit_sales_person",
+                )
+                delivery_description_input = st.text_area(
+                    "Description",
+                    value=clean_text(delivery_record.get("description")),
+                    key=f"{key_prefix}_doc_edit_description",
+                )
+                delivery_remarks_input = st.text_area(
+                    "Remarks",
+                    value=clean_text(delivery_record.get("remarks")),
+                    key=f"{key_prefix}_doc_edit_remarks",
+                )
+                edited_delivery_items = st.data_editor(
+                    delivery_items_df[["description", "quantity", "unit_price"]],
+                    num_rows="dynamic",
+                    hide_index=True,
+                    use_container_width=True,
+                    key=f"{key_prefix}_doc_edit_items",
+                    column_config={
+                        "description": st.column_config.TextColumn("Product"),
+                        "quantity": st.column_config.NumberColumn(
+                            "Qty", min_value=0.0, step=1.0, format="%d"
+                        ),
+                        "unit_price": st.column_config.NumberColumn(
+                            "Unit price", min_value=0.0, step=100.0, format="%.2f"
+                        ),
+                    },
+                )
             save_doc_changes = st.form_submit_button(
                 "Save document changes",
                 type="primary",
@@ -11496,6 +11590,54 @@ def render_operations_document_uploader(
                 ),
             )
             conn.commit()
+            if doc_type_choice in {"Delivery order", "Work done"} and delivery_record:
+                items_records = (
+                    edited_delivery_items.to_dict("records")
+                    if isinstance(edited_delivery_items, pd.DataFrame)
+                    else []
+                )
+                cleaned_items, total_amount = normalize_simple_items(items_records)
+                items_payload = json.dumps(cleaned_items, ensure_ascii=False) if cleaned_items else None
+                record_type = clean_text(delivery_record.get("record_type")) or (
+                    "work_done" if doc_type_choice == "Work done" else "delivery_order"
+                )
+                conn.execute(
+                    """
+                    UPDATE delivery_orders
+                    SET description=?,
+                        remarks=?,
+                        sales_person=?,
+                        status=?,
+                        items_payload=?,
+                        total_amount=?,
+                        file_path=?,
+                        updated_at=datetime('now')
+                    WHERE do_number=?
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        clean_text(delivery_description_input),
+                        clean_text(delivery_remarks_input),
+                        clean_text(delivery_sales_person),
+                        normalize_delivery_status(delivery_status_choice),
+                        items_payload,
+                        total_amount if cleaned_items else None,
+                        stored_path,
+                        clean_text(delivery_record.get("do_number")),
+                    ),
+                )
+                conn.commit()
+                log_activity(
+                    conn,
+                    event_type="work_done_updated"
+                    if record_type == "work_done"
+                    else "delivery_order_updated",
+                    description=f"{'Work done' if record_type == 'work_done' else 'Delivery order'} "
+                    f"{clean_text(delivery_record.get('do_number'))} updated",
+                    entity_type="delivery_order",
+                    entity_id=clean_text(delivery_record.get("do_number")),
+                    user_id=actor_id,
+                )
             log_activity(
                 conn,
                 event_type="customer_document_updated",
@@ -11544,7 +11686,8 @@ def render_operations_document_uploader(
     other_df = df_query(
         conn,
         """
-        SELECT document_id, description, items_payload, file_path, original_name, uploaded_at, uploaded_by
+        SELECT document_id, description, items_payload, file_path, original_name,
+               uploaded_at, uploaded_by, updated_at, updated_by
         FROM operations_other_documents
         WHERE customer_id=?
           AND deleted_at IS NULL
@@ -11557,9 +11700,12 @@ def render_operations_document_uploader(
         for _, row in other_df.iterrows():
             label = clean_text(row.get("description")) or "Other purchase"
             uploaded_at = pd.to_datetime(row.get("uploaded_at"), errors="coerce")
+            updated_at = pd.to_datetime(row.get("updated_at"), errors="coerce")
             date_label = uploaded_at.strftime("%d-%m-%Y") if pd.notna(uploaded_at) else ""
             header = f"{label} {f'({date_label})' if date_label else ''}".strip()
             with st.expander(header, expanded=False):
+                if pd.notna(updated_at) and updated_at != uploaded_at:
+                    st.caption(f"Last updated: {updated_at.strftime('%d-%m-%Y')}")
                 items_payload = clean_text(row.get("items_payload"))
                 if items_payload:
                     try:
@@ -11707,7 +11853,8 @@ def render_operations_document_uploader(
                     items_payload=?,
                     file_path=?,
                     original_name=?,
-                    updated_at=datetime('now')
+                    updated_at=datetime('now'),
+                    updated_by=?
                 WHERE document_id=?
                   AND deleted_at IS NULL
                 """,
@@ -11716,6 +11863,7 @@ def render_operations_document_uploader(
                     items_payload,
                     stored_path,
                     original_name,
+                    actor_id,
                     int(selected_other_id),
                 ),
             )
@@ -11801,11 +11949,14 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
                o.uploaded_at,
                o.updated_at,
                o.uploaded_by,
+               o.updated_by,
                COALESCE(c.name, c.company_name, '(customer)') AS customer,
-               COALESCE(u.username, '(user)') AS uploaded_by_name
+               COALESCE(u.username, '(user)') AS uploaded_by_name,
+               COALESCE(uu.username, '(user)') AS updated_by_name
         FROM operations_other_documents o
         LEFT JOIN customers c ON c.customer_id = o.customer_id
         LEFT JOIN users u ON u.user_id = o.uploaded_by
+        LEFT JOIN users uu ON uu.user_id = o.updated_by
         WHERE o.deleted_at IS NULL
         ORDER BY datetime(o.uploaded_at) DESC, o.document_id DESC
         """,
@@ -11862,11 +12013,21 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
             "uploaded_at": "Uploaded",
             "updated_at": "Updated",
             "uploaded_by_name": "Uploaded by",
+            "updated_by_name": "Updated by",
         }
     )
     st.dataframe(
         display_df[
-            ["Description", "Customer", "Items", "Uploaded", "Updated", "Document", "Uploaded by"]
+            [
+                "Description",
+                "Customer",
+                "Items",
+                "Uploaded",
+                "Updated",
+                "Document",
+                "Uploaded by",
+                "Updated by",
+            ]
         ],
         use_container_width=True,
         hide_index=True,
@@ -11999,7 +12160,8 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
                 items_payload=?,
                 file_path=?,
                 original_name=?,
-                updated_at=datetime('now')
+                updated_at=datetime('now'),
+                updated_by=?
             WHERE document_id=?
               AND deleted_at IS NULL
             """,
@@ -12008,6 +12170,7 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
                 items_payload,
                 stored_path,
                 original_name,
+                actor_id,
                 int(selected_id),
             ),
         )
