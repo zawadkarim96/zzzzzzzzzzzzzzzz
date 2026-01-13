@@ -110,4 +110,6 @@ def get_backup_status(backup_dir: Path) -> dict[str, str]:
         "last_backup_at": last_backup_at,
         "last_backup_file": metadata.get("last_backup_file", ""),
         "backup_dir": str(backup_dir),
+        "mirror_dir": metadata.get("mirror_dir", ""),
+        "mirror_error": metadata.get("mirror_error", ""),
     }
