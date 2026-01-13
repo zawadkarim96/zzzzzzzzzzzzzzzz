@@ -6471,16 +6471,18 @@ SESSION_DURATION_DAYS = int(os.getenv("PS_CRM_SESSION_DAYS", "7"))
 
 
 def _get_session_token_from_url() -> Optional[str]:
-    params = st.experimental_get_query_params()
+    params = st.query_params
     token_values = params.get(SESSION_TOKEN_PARAM, [])
-    return token_values[0] if token_values else None
+    if isinstance(token_values, list):
+        return token_values[0] if token_values else None
+    return token_values or None
 
 
 def _set_session_token_in_url(token: Optional[str]) -> None:
     if token:
-        st.experimental_set_query_params(**{SESSION_TOKEN_PARAM: token})
+        st.query_params[SESSION_TOKEN_PARAM] = token
     else:
-        st.experimental_set_query_params()
+        st.query_params.clear()
 
 
 def _purge_expired_sessions(conn) -> None:
