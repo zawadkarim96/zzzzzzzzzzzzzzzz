@@ -12163,6 +12163,7 @@ def customers_page(conn):
         show_heading=False,
         show_editor=False,
         show_filters=False,
+        enable_uploads=False,
     )
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
@@ -16164,14 +16165,15 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         st.info("No maintenance records yet. Log one using the form above.")
 
 
-def _reset_delivery_order_form_state() -> None:
-    st.session_state["delivery_order_items_rows"] = _default_delivery_items()
-    st.session_state["delivery_order_number"] = ""
-    st.session_state["delivery_order_customer"] = None
-    st.session_state["delivery_order_description"] = ""
-    st.session_state["delivery_order_remarks"] = ""
-    st.session_state["delivery_order_status"] = "due"
-    for key in ("do_form_loader", "delivery_order_items_editor"):
+def _reset_delivery_order_form_state(record_type_key: str) -> None:
+    key_prefix = f"{record_type_key}_do"
+    st.session_state[f"{key_prefix}_items_rows"] = _default_delivery_items()
+    st.session_state[f"{key_prefix}_number"] = ""
+    st.session_state[f"{key_prefix}_customer"] = None
+    st.session_state[f"{key_prefix}_description"] = ""
+    st.session_state[f"{key_prefix}_remarks"] = ""
+    st.session_state[f"{key_prefix}_status"] = "due"
+    for key in (f"{key_prefix}_form_loader", f"{key_prefix}_items_editor"):
         st.session_state.pop(key, None)
     for record_key in ("delivery_order", "work_done"):
         st.session_state.pop(f"{record_key}_receipt_upload", None)
@@ -16214,17 +16216,34 @@ def delivery_orders_page(
     record_label_input = clean_text(record_type_label)
     record_label = record_label_input or "Delivery order"
     record_label_lower = record_label.lower()
-    if st.session_state.pop("delivery_order_form_reset_pending", False):
-        _reset_delivery_order_form_state()
-    feedback_message = st.session_state.pop("delivery_order_form_feedback", None)
+    key_prefix = f"{record_type_key}_do"
+    reset_pending_key = f"{key_prefix}_form_reset_pending"
+    feedback_key = f"{key_prefix}_form_feedback"
+    items_rows_key = f"{key_prefix}_items_rows"
+    number_key = f"{key_prefix}_number"
+    customer_key = f"{key_prefix}_customer"
+    description_key = f"{key_prefix}_description"
+    remarks_key = f"{key_prefix}_remarks"
+    status_key = f"{key_prefix}_status"
+    form_loader_key = f"{key_prefix}_form_loader"
+    form_key = f"{key_prefix}_form"
+    items_editor_key = f"{key_prefix}_items_editor"
+    filter_text_key = f"{key_prefix}_filter_text"
+    filter_customer_key = f"{key_prefix}_filter_customer"
+    filter_date_toggle_key = f"{key_prefix}_filter_date_toggle"
+    filter_date_range_key = f"{key_prefix}_filter_date_range"
+
+    if st.session_state.pop(reset_pending_key, False):
+        _reset_delivery_order_form_state(record_type_key)
+    feedback_message = st.session_state.pop(feedback_key, None)
     if feedback_message:
         st.success(feedback_message)
-    st.session_state.setdefault("delivery_order_items_rows", _default_delivery_items())
-    st.session_state.setdefault("delivery_order_number", "")
-    st.session_state.setdefault("delivery_order_customer", None)
-    st.session_state.setdefault("delivery_order_description", "")
-    st.session_state.setdefault("delivery_order_remarks", "")
-    st.session_state.setdefault("delivery_order_status", "due")
+    st.session_state.setdefault(items_rows_key, _default_delivery_items())
+    st.session_state.setdefault(number_key, "")
+    st.session_state.setdefault(customer_key, None)
+    st.session_state.setdefault(description_key, "")
+    st.session_state.setdefault(remarks_key, "")
+    st.session_state.setdefault(status_key, "due")
     autofill_customer_key = f"{record_type_key}_autofill_customer"
     st.session_state.setdefault(autofill_customer_key, None)
 
@@ -16298,27 +16317,27 @@ def delivery_orders_page(
         f"Load existing {record_label_lower}",
         load_choices,
         format_func=lambda val: load_labels.get(val, "-- New delivery order --"),
-        key="do_form_loader",
+        key=form_loader_key,
     )
 
     if selected_existing:
         match = existing_dos[existing_dos["do_number"] == selected_existing]
         if not match.empty:
             row = match.iloc[0]
-            st.session_state["delivery_order_number"] = clean_text(row.get("do_number")) or ""
+            st.session_state[number_key] = clean_text(row.get("do_number")) or ""
             cust_id = row.get("customer_id")
-            st.session_state["delivery_order_customer"] = int(cust_id) if pd.notna(cust_id) else None
-            st.session_state["delivery_order_description"] = clean_text(row.get("description")) or ""
-            st.session_state["delivery_order_remarks"] = clean_text(row.get("remarks")) or ""
-            st.session_state["delivery_order_status"] = normalize_delivery_status(row.get("status"))
+            st.session_state[customer_key] = int(cust_id) if pd.notna(cust_id) else None
+            st.session_state[description_key] = clean_text(row.get("description")) or ""
+            st.session_state[remarks_key] = clean_text(row.get("remarks")) or ""
+            st.session_state[status_key] = normalize_delivery_status(row.get("status"))
             current_receipt_path = clean_text(row.get("payment_receipt_path"))
             loaded_items = parse_delivery_items_payload(row.get("items_payload"))
-            st.session_state["delivery_order_items_rows"] = loaded_items or _default_delivery_items()
+            st.session_state[items_rows_key] = loaded_items or _default_delivery_items()
         st.session_state[autofill_customer_key] = None
     else:
-        selected_customer_state = int_or_none(st.session_state.get("delivery_order_customer"))
+        selected_customer_state = int_or_none(st.session_state.get(customer_key))
         last_autofill_customer = int_or_none(st.session_state.get(autofill_customer_key))
-        current_number = clean_text(st.session_state.get("delivery_order_number"))
+        current_number = clean_text(st.session_state.get(number_key))
         suggested_code = None
         if selected_customer_state:
             suggested_code = customer_do_map.get(selected_customer_state)
@@ -16331,7 +16350,7 @@ def delivery_orders_page(
             and (selected_customer_state != last_autofill_customer or not current_number)
         )
         if should_autofill and suggested_code:
-            st.session_state["delivery_order_number"] = suggested_code
+            st.session_state[number_key] = suggested_code
             current_number = suggested_code
             st.session_state[autofill_customer_key] = selected_customer_state
         elif selected_customer_state is None:
@@ -16341,36 +16360,36 @@ def delivery_orders_page(
     receipt_download_name = None
     receipt_download_key = None
 
-    with st.form("delivery_order_form", clear_on_submit=True):
+    with st.form(form_key, clear_on_submit=True):
         do_number = st.text_input(
             f"{record_label} number *",
-            key="delivery_order_number",
+            key=number_key,
         )
         selected_customer = st.selectbox(
             "Customer",
             customer_options,
             format_func=lambda cid: customer_labels.get(cid, "-- Select customer --"),
-            key="delivery_order_customer",
+            key=customer_key,
         )
         description = st.text_area(
             "Description / items",
-            key="delivery_order_description",
+            key=description_key,
         )
         remarks = st.text_area(
             "Remarks",
-            key="delivery_order_remarks",
+            key=remarks_key,
         )
         status_value = st.selectbox(
             "Status",
             DELIVERY_STATUS_OPTIONS,
             index=DELIVERY_STATUS_OPTIONS.index(
-                normalize_delivery_status(st.session_state.get("delivery_order_status"))
+                normalize_delivery_status(st.session_state.get(status_key))
             ),
             format_func=lambda option: DELIVERY_STATUS_LABELS.get(option, option.title()),
             help="Paid delivery orders are locked against further edits.",
-            disabled=(clean_text(st.session_state.get("delivery_order_status")) or "").lower()
+            disabled=(clean_text(st.session_state.get(status_key)) or "").lower()
             in closed_statuses,
-            key="delivery_order_status",
+            key=status_key,
         )
         receipt_upload = None
         if status_value in {"advanced", "paid"}:
@@ -16406,7 +16425,7 @@ def delivery_orders_page(
                 st.caption("Uploading a new file will replace the current receipt.")
         st.markdown("**Products / items**")
         items_df_seed = pd.DataFrame(
-            st.session_state.get("delivery_order_items_rows", _default_delivery_items())
+            st.session_state.get(items_rows_key, _default_delivery_items())
         )
         if "line_total" in items_df_seed.columns:
             items_df_seed = items_df_seed.drop(columns=["line_total"], errors="ignore")
@@ -16415,7 +16434,7 @@ def delivery_orders_page(
             num_rows="dynamic",
             hide_index=True,
             use_container_width=True,
-            key="delivery_order_items_editor",
+            key=items_editor_key,
             column_config={
                 "description": st.column_config.TextColumn(
                     "Description", help="What is being delivered / sold"
@@ -16431,11 +16450,11 @@ def delivery_orders_page(
                 ),
             },
         )
-        st.session_state["delivery_order_items_rows"] = (
+        st.session_state[items_rows_key] = (
             items_editor.to_dict("records") if isinstance(items_editor, pd.DataFrame) else []
         )
         items_clean, estimated_total = normalize_delivery_items(
-            st.session_state.get("delivery_order_items_rows", [])
+            st.session_state.get(items_rows_key, [])
         )
         st.caption(
             f"Estimated total: {format_money(estimated_total) or f'{estimated_total:,.2f}'}"
@@ -16578,7 +16597,7 @@ def delivery_orders_page(
                 st.success("Receipt added to locked record.")
                 return
             items_clean, total_amount_value = normalize_delivery_items(
-                st.session_state.get("delivery_order_items_rows", [])
+                st.session_state.get(items_rows_key, [])
             )
             if not items_clean:
                 st.error("Add at least one product line with pricing to save the delivery order.")
@@ -16662,8 +16681,8 @@ def delivery_orders_page(
                 entity_id=None,
             )
 
-            st.session_state["delivery_order_form_reset_pending"] = True
-            st.session_state["delivery_order_form_feedback"] = (
+            st.session_state[reset_pending_key] = True
+            st.session_state[feedback_key] = (
                 f"{record_label} {cleaned_number} saved successfully."
             )
             _safe_rerun()
@@ -16675,23 +16694,26 @@ def delivery_orders_page(
     with filter_cols[0]:
         query_text = st.text_input(
             f"Search by {record_label.lower()} number, description or remarks",
-            key="do_filter_text",
+            key=filter_text_key,
         )
     with filter_cols[1]:
         customer_filter = st.selectbox(
             "Filter by customer",
             options=[None] + [opt for opt in customer_options if opt is not None],
             format_func=lambda cid: customer_labels.get(cid, "(any)"),
-            key="do_filter_customer",
+            key=filter_customer_key,
         )
     with filter_cols[2]:
-        use_date_filter = st.checkbox("Filter by created date", key="do_filter_date_toggle")
+        use_date_filter = st.checkbox(
+            "Filter by created date",
+            key=filter_date_toggle_key,
+        )
     date_range = None
     if use_date_filter:
         date_range = st.date_input(
             "Created between",
             value=(datetime.now().date() - timedelta(days=30), datetime.now().date()),
-            key="do_filter_date_range",
+            key=filter_date_range_key,
         )
 
     do_df = df_query(
@@ -16901,7 +16923,9 @@ def delivery_orders_page(
     if downloads:
         st.markdown(f"#### Download {record_label.lower()}")
         selected_download = st.selectbox(
-            f"Pick a {record_label_lower}", list(downloads.keys()), key="do_download_select"
+            f"Pick a {record_label_lower}",
+            list(downloads.keys()),
+            key=f"{key_prefix}_download_select",
         )
         path_value = downloads.get(selected_download)
         file_path = resolve_upload_path(path_value)
@@ -16910,11 +16934,11 @@ def delivery_orders_page(
                 f"Download {selected_download}",
                 data=file_path.read_bytes(),
                 file_name=file_path.name,
-                key="do_download_button",
+                key=f"{key_prefix}_download_button",
             )
         else:
             st.info("The selected delivery order file could not be found.")
-    elif st.session_state.get("do_filter_text") or query_text:
+    elif st.session_state.get(filter_text_key) or query_text:
         st.caption(
             f"No matching {record_label_lower} records found for the applied filters."
         )
@@ -16941,11 +16965,11 @@ def delivery_orders_page(
         f"Select a {record_label_lower} to delete",
         delete_options,
         format_func=lambda val: delete_labels.get(val, val),
-        key=f"{record_label_lower}_delete_select",
+        key=f"{key_prefix}_delete_select",
     )
     confirm_delete = st.checkbox(
         f"I understand this {record_label_lower} will be removed from active views.",
-        key=f"{record_label_lower}_delete_confirm",
+        key=f"{key_prefix}_delete_confirm",
     )
     if st.button(
         f"Delete {record_label_lower}",
@@ -18330,6 +18354,21 @@ def import_page(conn):
     st.markdown("#### Review & edit rows before importing")
     preview = df_norm.copy()
     preview["Action"] = "Import"
+    preview_text_columns = [
+        "customer_name",
+        "address",
+        "delivery_address",
+        "phone",
+        "product",
+        "do_code",
+        "work_done_code",
+        "service_code",
+        "maintenance_code",
+        "remarks",
+    ]
+    for column in preview_text_columns:
+        if column in preview.columns:
+            preview[column] = preview[column].fillna("").astype(str)
     editor = st.data_editor(
         preview,
         key="import_editor",
