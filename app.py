@@ -4075,6 +4075,28 @@ def ensure_upload_dirs():
         path.mkdir(parents=True, exist_ok=True)
 
 
+def _read_uploaded_bytes(uploaded_file) -> bytes:
+    if uploaded_file is None:
+        return b""
+    data = b""
+    if hasattr(uploaded_file, "getvalue"):
+        try:
+            data = uploaded_file.getvalue()
+        except Exception:
+            data = b""
+    if data:
+        return data
+    if hasattr(uploaded_file, "seek"):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+    try:
+        return uploaded_file.read()
+    except Exception:
+        return b""
+
+
 def save_uploaded_file(
     uploaded_file,
     target_dir: Path,
@@ -4107,8 +4129,11 @@ def save_uploaded_file(
         suffix = dest.suffix
         dest = target_dir / f"{stem}_{counter}{suffix}"
         counter += 1
+    data = _read_uploaded_bytes(uploaded_file)
+    if not data:
+        return None
     with open(dest, "wb") as fh:
-        fh.write(uploaded_file.read())
+        fh.write(data)
     return dest
 
 
@@ -4209,8 +4234,11 @@ def store_report_attachment(uploaded_file, *, identifier: Optional[str] = None) 
     while dest.exists():
         dest = REPORT_DOCS_DIR / f"{safe_stem}_{counter}{suffix}"
         counter += 1
+    data = _read_uploaded_bytes(uploaded_file)
+    if not data:
+        return None
     with open(dest, "wb") as fh:
-        fh.write(uploaded_file.read())
+        fh.write(data)
     try:
         return str(dest.relative_to(BASE_DIR))
     except ValueError:
@@ -21355,33 +21383,37 @@ def manage_import_history(conn):
         delete_btn = col2.form_submit_button("Delete import", disabled=not can_delete)
 
     if save_btn:
-        update_import_entry(
-            conn,
-            selected,
-            {
-                "customer_name": name_input,
-                "phone": phone_input,
-                "address": address_input,
-                "delivery_address": delivery_address_input,
-                "purchase_date": purchase_input,
-                "product_label": product_input,
-                "do_number": do_input,
-                "remarks": remarks_input,
-                "amount_spent": amount_input,
-                "quantity": quantity_input,
-            },
-        )
-        conn.execute(
-            "UPDATE import_history SET notes=?, amount_spent=? WHERE import_id=?",
-            (
-                clean_text(remarks_input),
-                parse_amount(amount_input),
-                int(selected_id),
-            ),
-        )
-        conn.commit()
-        st.success("Import entry updated.")
-        _safe_rerun()
+        try:
+            update_import_entry(
+                conn,
+                selected,
+                {
+                    "customer_name": name_input,
+                    "phone": phone_input,
+                    "address": address_input,
+                    "delivery_address": delivery_address_input,
+                    "purchase_date": purchase_input,
+                    "product_label": product_input,
+                    "do_number": do_input,
+                    "remarks": remarks_input,
+                    "amount_spent": amount_input,
+                    "quantity": quantity_input,
+                },
+            )
+            conn.execute(
+                "UPDATE import_history SET notes=?, amount_spent=? WHERE import_id=?",
+                (
+                    clean_text(remarks_input),
+                    parse_amount(amount_input),
+                    int(selected_id),
+                ),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            st.error(f"Unable to amend this import entry. {exc}")
+        else:
+            st.success("Import entry updated.")
+            _safe_rerun()
 
     if delete_btn and can_delete:
         delete_import_entry(conn, selected)
