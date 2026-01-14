@@ -84,6 +84,7 @@ REPORT_DOCS_DIR = UPLOADS_DIR / "report_documents"
 QUOTATION_RECEIPT_DIR = UPLOADS_DIR / "quotation_receipts"
 QUOTATION_DOCS_DIR = UPLOADS_DIR / "quotation_documents"
 DELIVERY_RECEIPT_DIR = UPLOADS_DIR / "delivery_receipts"
+DOCUMENT_UPLOAD_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
 QUOTATION_EDITOR_PORT = int(os.getenv("QUOTATION_EDITOR_PORT", "8502"))
 
 DEFAULT_QUOTATION_VALID_DAYS = 30
@@ -2928,6 +2929,11 @@ def to_iso_date(value) -> Optional[str]:
         if not stripped:
             return None
         value = stripped
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
     if isinstance(value, datetime):
         return value.date().strftime("%Y-%m-%d")
     if isinstance(value, date):
@@ -4116,6 +4122,35 @@ def store_uploaded_pdf(uploaded_file, target_dir: Path, filename: Optional[str] 
     """
 
     saved_path = save_uploaded_file(uploaded_file, target_dir, filename=filename)
+    if not saved_path:
+        return None
+    try:
+        return str(saved_path.relative_to(BASE_DIR))
+    except ValueError:
+        return str(saved_path)
+
+
+def store_uploaded_document(
+    uploaded_file,
+    target_dir: Path,
+    *,
+    filename_stem: str,
+    allowed_extensions: Optional[set[str]] = None,
+    default_extension: str = ".pdf",
+) -> Optional[str]:
+    """Persist an uploaded document (PDF or image) and return its path relative to ``BASE_DIR``."""
+
+    if uploaded_file is None:
+        return None
+    suffix = Path(getattr(uploaded_file, "name", "") or "").suffix.lower()
+    filename = f"{filename_stem}{suffix}" if suffix else filename_stem
+    saved_path = save_uploaded_file(
+        uploaded_file,
+        target_dir,
+        filename=filename,
+        allowed_extensions=allowed_extensions or DOCUMENT_UPLOAD_EXTENSIONS,
+        default_extension=default_extension,
+    )
     if not saved_path:
         return None
     try:
@@ -12552,10 +12587,10 @@ def customers_page(conn):
                     help="Record who handled this sale for quick reference later.",
                 )
                 customer_pdf = st.file_uploader(
-                    "Attach customer PDF",
-                    type=["pdf"],
+                    "Attach customer document (PDF or image)",
+                    type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
                     key="new_customer_pdf",
-                    help="Upload signed agreements, invoices or other supporting paperwork.",
+                    help="Upload signed agreements, invoices, photos, or other supporting paperwork.",
                 )
                 st.markdown("---")
                 create_cols = st.columns(4)
@@ -13229,8 +13264,10 @@ def customers_page(conn):
                     )
                     conn.commit()
                 if customer_pdf is not None:
-                    stored_path = store_uploaded_pdf(
-                        customer_pdf, CUSTOMER_DOCS_DIR, filename=f"customer_{cid}.pdf"
+                    stored_path = store_uploaded_document(
+                        customer_pdf,
+                        CUSTOMER_DOCS_DIR,
+                        filename_stem=f"customer_{cid}",
                     )
                     if stored_path:
                         conn.execute(
@@ -13301,13 +13338,13 @@ def customers_page(conn):
             resolved_attachment = resolve_upload_path(attachment_path)
             if resolved_attachment and resolved_attachment.exists():
                 st.download_button(
-                    "Download current PDF",
+                    "Download current document",
                     data=resolved_attachment.read_bytes(),
                     file_name=resolved_attachment.name,
                     key=f"cust_pdf_dl_{selected_customer_id}",
                 )
             else:
-                st.caption("No customer PDF attached yet.")
+                st.caption("No customer document attached yet.")
             is_admin = user.get("role") == "admin"
             uploader_name = clean_text(selected_raw.get("uploaded_by"))
             if is_admin:
@@ -13342,7 +13379,9 @@ def customers_page(conn):
                     "Sales person", value=clean_text(selected_raw.get("sales_person")) or ""
                 )
                 new_pdf = st.file_uploader(
-                    "Attach/replace customer PDF", type=["pdf"], key=f"edit_customer_pdf_{selected_customer_id}"
+                    "Attach/replace customer document (PDF or image)",
+                    type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
+                    key=f"edit_customer_pdf_{selected_customer_id}",
                 )
                 col1, col2 = st.columns(2)
                 save_customer = col1.form_submit_button("Save changes", type="primary")
@@ -13362,10 +13401,10 @@ def customers_page(conn):
                 new_sales_person = clean_text(sales_person_edit)
                 new_attachment_path = attachment_path
                 if new_pdf is not None:
-                    stored_path = store_uploaded_pdf(
+                    stored_path = store_uploaded_document(
                         new_pdf,
                         CUSTOMER_DOCS_DIR,
-                        filename=f"customer_{selected_customer_id}.pdf",
+                        filename_stem=f"customer_{selected_customer_id}",
                     )
                     if stored_path:
                         new_attachment_path = stored_path
@@ -13887,8 +13926,8 @@ def _render_service_section(conn, *, show_heading: bool = True):
         )
         st.session_state["service_product_rows"] = service_product_entries
         service_files = st.file_uploader(
-            "Attach service documents (PDF)",
-            type=["pdf"],
+            "Attach service documents (PDF or image)",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
             accept_multiple_files=True,
             key="service_new_docs",
         )
@@ -13990,6 +14029,7 @@ def _render_service_section(conn, *, show_heading: bool = True):
                     service_files,
                     SERVICE_DOCS_DIR,
                     f"service_{service_id}",
+                    allowed_extensions=DOCUMENT_UPLOAD_EXTENSIONS,
                 )
                 conn.commit()
                 service_label = do_labels.get(selected_do) if selected_do else None
@@ -14371,8 +14411,8 @@ def _render_service_section(conn, *, show_heading: bool = True):
 
         with st.form(f"service_doc_upload_{selected_service_id}"):
             more_docs = st.file_uploader(
-                "Add more service documents (PDF)",
-                type=["pdf"],
+                "Add more service documents (PDF or image)",
+                type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
                 accept_multiple_files=True,
                 key=f"service_doc_files_{selected_service_id}",
             )
@@ -14387,12 +14427,13 @@ def _render_service_section(conn, *, show_heading: bool = True):
                     more_docs,
                     SERVICE_DOCS_DIR,
                     f"service_{selected_service_id}",
+                    allowed_extensions=DOCUMENT_UPLOAD_EXTENSIONS,
                 )
                 conn.commit()
                 st.success(f"Uploaded {saved} document(s).")
                 _safe_rerun()
             else:
-                st.info("Select at least one PDF to upload.")
+                st.info("Select at least one PDF or image to upload.")
 
         st.markdown("#### Delete service record")
         actor_id = current_user_id()
@@ -16905,8 +16946,8 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
         )
         st.session_state["maintenance_product_rows"] = maintenance_product_entries
         maintenance_files = st.file_uploader(
-            "Attach maintenance documents (PDF)",
-            type=["pdf"],
+            "Attach maintenance documents (PDF or image)",
+            type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
             accept_multiple_files=True,
             key="maintenance_new_docs",
         )
@@ -17002,6 +17043,7 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                 maintenance_files,
                 MAINTENANCE_DOCS_DIR,
                 f"maintenance_{maintenance_id}",
+                allowed_extensions=DOCUMENT_UPLOAD_EXTENSIONS,
             )
             conn.commit()
             maintenance_label = do_labels.get(selected_do) if selected_do else None
@@ -17363,8 +17405,8 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
 
         with st.form(f"maintenance_doc_upload_{selected_maintenance_id}"):
             more_docs = st.file_uploader(
-                "Add more maintenance documents (PDF)",
-                type=["pdf"],
+                "Add more maintenance documents (PDF or image)",
+                type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
                 accept_multiple_files=True,
                 key=f"maintenance_doc_files_{selected_maintenance_id}",
             )
@@ -17379,12 +17421,13 @@ def _render_maintenance_section(conn, *, show_heading: bool = True):
                     more_docs,
                     MAINTENANCE_DOCS_DIR,
                     f"maintenance_{selected_maintenance_id}",
+                    allowed_extensions=DOCUMENT_UPLOAD_EXTENSIONS,
                 )
                 conn.commit()
                 st.success(f"Uploaded {saved} document(s).")
                 _safe_rerun()
             else:
-                st.info("Select at least one PDF to upload.")
+                st.info("Select at least one PDF or image to upload.")
 
         st.markdown("#### Delete maintenance record")
         actor_id = current_user_id()
