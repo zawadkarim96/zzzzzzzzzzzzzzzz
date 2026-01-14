@@ -139,3 +139,78 @@ def test_upcoming_warranty_breakdown_groups_by_dimension(db_conn, app_module):
 
     fallback_breakdown = app_module.upcoming_warranty_breakdown(db_conn, days_ahead=30, group_by="unknown")
     assert list(fallback_breakdown.columns)[0] == "Sales person"
+
+
+def test_fetch_warranty_window_filters_active_named_products(db_conn, app_module):
+    today = date.today()
+    window_start = today.isoformat()
+    window_end = (today + app_module.timedelta(days=30)).isoformat()
+    late_date = (today + app_module.timedelta(days=45)).isoformat()
+
+    cur = db_conn.cursor()
+    cur.execute(
+        "INSERT INTO customers (name, phone, address) VALUES (?, ?, ?)",
+        ("Solaris", "333", "Third"),
+    )
+    customer_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO products (name, model, serial) VALUES (?, ?, ?)",
+        ("AlphaGen", "AG-1", "SER-1"),
+    )
+    product_id = cur.lastrowid
+    cur.execute(
+        "INSERT INTO products (name, model, serial) VALUES (?, ?, ?)",
+        ("", "AG-2", "SER-2"),
+    )
+    blank_product_id = cur.lastrowid
+
+    cur.execute(
+        "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (customer_id, product_id, "SER-OK", window_start, window_end, "active"),
+    )
+    cur.execute(
+        "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (customer_id, product_id, "SER-LATE", window_start, late_date, "active"),
+    )
+    cur.execute(
+        "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (customer_id, blank_product_id, "SER-BLANK", window_start, window_end, "active"),
+    )
+    cur.execute(
+        "INSERT INTO warranties (customer_id, product_id, serial, issue_date, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?)",
+        (customer_id, product_id, "SER-INACTIVE", window_start, window_end, "inactive"),
+    )
+    db_conn.commit()
+
+    results = app_module.fetch_warranty_window(db_conn, 0, 30)
+
+    assert list(results["serial"]) == ["SER-OK"]
+
+
+def test_format_warranty_table_marks_expired_and_active(app_module):
+    today = date.today()
+    rows = [
+        {
+            "customer": "Zen",
+            "product": "Omega",
+            "model": "O-1",
+            "serial": "SER-PAST",
+            "issue_date": today.isoformat(),
+            "expiry_date": (today - app_module.timedelta(days=1)).isoformat(),
+            "status": "active",
+        },
+        {
+            "customer": "Zen",
+            "product": "Omega",
+            "model": "O-2",
+            "serial": "SER-FUTURE",
+            "issue_date": today.isoformat(),
+            "expiry_date": (today + app_module.timedelta(days=5)).isoformat(),
+            "status": "active",
+        },
+    ]
+    df = app_module.pd.DataFrame(rows)
+
+    formatted = app_module.format_warranty_table(df)
+
+    assert list(formatted["Status"]) == ["Expired", "Active"]
