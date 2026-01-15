@@ -3803,6 +3803,7 @@ def _reset_new_customer_form_state() -> None:
         "new_customer_address",
         "new_customer_delivery_address",
         "new_customer_purchase_date",
+        "new_customer_purchase_date_enabled",
         "new_customer_do_code",
         "new_customer_sales_person",
         "new_customer_remarks",
@@ -7392,12 +7393,16 @@ def dashboard(conn):
                     label_map = summary_labels.get(
                         template_key, summary_labels["service"]
                     )
-                    st.markdown(f"**{label_map['tasks']}**")
-                    st.write(clean_text(record.get("tasks")) or "—")
-                    st.markdown(f"**{label_map['remarks']}**")
-                    st.write(clean_text(record.get("remarks")) or "—")
-                    st.markdown(f"**{label_map['research']}**")
-                    st.write(clean_text(record.get("research")) or "—")
+                    summary_cols = st.columns(3)
+                    summary_fields = [
+                        (label_map["tasks"], "tasks"),
+                        (label_map["remarks"], "remarks"),
+                        (label_map["research"], "research"),
+                    ]
+                    for col, (label, field) in zip(summary_cols, summary_fields):
+                        with col:
+                            st.markdown(f"**{label}**")
+                            st.write(clean_text(record.get(field)) or "—")
                     summary_lines = [
                         f"Daily submission for {selected_staff_name}",
                         f"Template: {template_label}",
@@ -7696,6 +7701,19 @@ def dashboard(conn):
         else:
             report_scope = "WHERE 1=0"
 
+    report_metrics = df_query(
+        conn,
+        dedent(
+            f"""
+            SELECT COUNT(*) AS total_reports,
+                   SUM(CASE WHEN date(wr.created_at) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS weekly_reports,
+                   SUM(CASE WHEN strftime('%Y-%m', wr.created_at) = strftime('%Y-%m', 'now') THEN 1 ELSE 0 END) AS monthly_reports
+            FROM work_reports wr
+            {report_scope}
+            """
+        ),
+        report_params,
+    )
     recent_reports = df_query(
         conn,
         dedent(
@@ -7716,6 +7734,21 @@ def dashboard(conn):
         ),
         report_params,
     )
+
+    if not report_metrics.empty:
+        total_reports = int(report_metrics.iloc[0].get("total_reports") or 0)
+        weekly_reports = int(report_metrics.iloc[0].get("weekly_reports") or 0)
+        monthly_reports = int(report_metrics.iloc[0].get("monthly_reports") or 0)
+    else:
+        total_reports = 0
+        weekly_reports = 0
+        monthly_reports = 0
+
+    st.markdown("#### Report submissions")
+    report_metric_cols = st.columns(3)
+    report_metric_cols[0].metric("Total reports", total_reports)
+    report_metric_cols[1].metric("Weekly reports", weekly_reports)
+    report_metric_cols[2].metric("Monthly reports", monthly_reports)
 
     if not recent_reports.empty:
         st.markdown("#### Recent report submissions")
@@ -8178,6 +8211,8 @@ def dashboard(conn):
         dedent(
             f"""
             SELECT COUNT(*) AS total_quotes,
+                   SUM(CASE WHEN date(quote_date) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS weekly_quotes,
+                   SUM(CASE WHEN strftime('%Y-%m', quote_date) = strftime('%Y-%m', 'now') THEN 1 ELSE 0 END) AS monthly_quotes,
                    SUM(CASE WHEN LOWER(status) = 'paid' THEN 1 ELSE 0 END) AS paid_quotes
             FROM quotations
             {quote_clause}
@@ -8215,15 +8250,21 @@ def dashboard(conn):
         st.markdown("#### Quotation insights")
         if quote_metrics.empty:
             total_quotes = 0
+            weekly_quotes = 0
+            monthly_quotes = 0
             paid_quotes = 0
         else:
             total_quotes = int(quote_metrics.iloc[0].get("total_quotes") or 0)
+            weekly_quotes = int(quote_metrics.iloc[0].get("weekly_quotes") or 0)
+            monthly_quotes = int(quote_metrics.iloc[0].get("monthly_quotes") or 0)
             paid_quotes = int(quote_metrics.iloc[0].get("paid_quotes") or 0)
         conversion = (paid_quotes / total_quotes) * 100 if total_quotes else 0.0
-        metrics_cols = st.columns(3)
+        metrics_cols = st.columns(5)
         metrics_cols[0].metric("Quotations created", total_quotes)
-        metrics_cols[1].metric("Paid / converted", paid_quotes)
-        metrics_cols[2].metric("Conversion rate", f"{conversion:.1f}%")
+        metrics_cols[1].metric("Weekly quotations", weekly_quotes)
+        metrics_cols[2].metric("Monthly quotations", monthly_quotes)
+        metrics_cols[3].metric("Paid / converted", paid_quotes)
+        metrics_cols[4].metric("Conversion rate", f"{conversion:.1f}%")
 
         quotes_df = fmt_dates(quotes_df, ["quote_date"])
         quotes_df["customer"] = quotes_df["customer"].apply(
@@ -9330,6 +9371,7 @@ def render_customer_quick_edit_section(
     *,
     key_prefix: str,
     include_leads: bool = True,
+    include_leads_in_main: bool = False,
     show_heading: bool = True,
     show_editor: bool = True,
     show_filters: bool = True,
@@ -9443,7 +9485,8 @@ def render_customer_quick_edit_section(
     )
     lead_mask = df_raw.get("remarks", pd.Series(dtype=object)).apply(_is_lead_customer)
     lead_df = df_raw[lead_mask].copy()
-    df_raw = df_raw[~lead_mask].copy()
+    if not include_leads_in_main:
+        df_raw = df_raw[~lead_mask].copy()
     user = st.session_state.user or {}
     is_admin = user.get("role") == "admin"
     current_actor_id = current_user_id()
@@ -10265,9 +10308,10 @@ def _render_doc_detail_inputs(
         )
         details["items"] = items_records
         st.session_state[items_key] = items_records
+        default_purchase_date = parse_date_value(defaults.get("purchase_date"))
         details["quote_date"] = st.date_input(
             "Quotation date",
-            value=date.today(),
+            value=default_purchase_date or date.today(),
             key=f"{key_prefix}_quotation_date",
             format="DD-MM-YYYY",
         )
@@ -12503,12 +12547,27 @@ def customers_page(conn):
                 key="new_customer_delivery_address",
                 help="Where goods should be delivered. Leave blank if same as billing.",
             )
-            purchase_date = st.date_input(
-                "Purchase date",
-                value=datetime.now().date(),
-                key="new_customer_purchase_date",
-                help="Used as the warranty issue date when creating new warranty records.",
+            purchase_default = st.session_state.get("new_customer_purchase_date")
+            if isinstance(purchase_default, datetime):
+                purchase_default = purchase_default.date()
+            if not isinstance(purchase_default, date):
+                purchase_default = None
+            purchase_date_enabled = st.checkbox(
+                "Set purchase date",
+                value=bool(purchase_default),
+                key="new_customer_purchase_date_enabled",
+                help="Enable this if the customer has already purchased.",
             )
+            purchase_date = None
+            if purchase_date_enabled:
+                purchase_date = st.date_input(
+                    "Purchase date",
+                    value=purchase_default or datetime.now().date(),
+                    key="new_customer_purchase_date",
+                    help="Used as the warranty issue date when creating new warranty records.",
+                )
+            else:
+                st.session_state["new_customer_purchase_date"] = None
             remarks = st.text_area(
                 "Remarks",
                 key="new_customer_remarks",
@@ -12710,9 +12769,10 @@ def customers_page(conn):
 
                 if create_service:
                     service_cols = st.columns((1, 1, 1))
+                    service_date_default = purchase_date or datetime.now().date()
                     service_date_input = service_cols[0].date_input(
                         "Service date",
-                        value=purchase_date,
+                        value=service_date_default,
                         key="new_customer_service_date",
                     )
                     service_description = service_cols[1].text_area(
@@ -12740,9 +12800,10 @@ def customers_page(conn):
 
                 if create_maintenance:
                     maintenance_cols = st.columns((1, 1, 1))
+                    maintenance_date_default = purchase_date or datetime.now().date()
                     maintenance_date_input = maintenance_cols[0].date_input(
                         "Maintenance date",
-                        value=purchase_date,
+                        value=maintenance_date_default,
                         key="new_customer_maintenance_date",
                     )
                     maintenance_description = maintenance_cols[1].text_area(
@@ -13333,6 +13394,7 @@ def customers_page(conn):
         conn,
         key_prefix="customers",
         include_leads=True,
+        include_leads_in_main=True,
         show_heading=False,
         show_editor=False,
         show_filters=False,
