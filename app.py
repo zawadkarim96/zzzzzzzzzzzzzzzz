@@ -15853,10 +15853,17 @@ def _render_quotation_section(conn, *, render_id: Optional[int] = None):
                 index=1,
                 key="quotation_follow_up_choice",
             )
+            custom_follow_up = follow_up_choice == "Custom date"
+            if custom_follow_up and not st.session_state.get(
+                "quotation_follow_up_date_toggle"
+            ):
+                st.session_state["quotation_follow_up_date_toggle"] = True
             enable_follow_date = st.checkbox(
                 "Set follow-up date",
-                value=bool(st.session_state.get("quotation_follow_up_date")),
+                value=bool(st.session_state.get("quotation_follow_up_date"))
+                or custom_follow_up,
                 key="quotation_follow_up_date_toggle",
+                disabled=custom_follow_up,
             )
             follow_up_date_value = None
             if enable_follow_date:
