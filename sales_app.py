@@ -3104,6 +3104,31 @@ def quotation_metrics(user: Dict) -> Dict[str, int]:
     return counts
 
 
+def quotation_period_counts(user: Dict) -> Dict[str, int]:
+    where = ""
+    params: List = []
+    if user["role"] == "staff":
+        where = "WHERE salesperson_id=?"
+        params.append(user["user_id"])
+    query = textwrap.dedent(
+        f"""
+        SELECT
+            SUM(CASE WHEN date(quote_date) >= date('now', '-6 days') THEN 1 ELSE 0 END) AS weekly_quotes,
+            SUM(CASE WHEN strftime('%Y-%m', quote_date) = strftime('%Y-%m', 'now') THEN 1 ELSE 0 END) AS monthly_quotes
+        FROM quotations
+        {where}
+        """
+    )
+    with get_conn() as conn:
+        row = conn.execute(query, tuple(params)).fetchone()
+    if not row:
+        return {"weekly": 0, "monthly": 0}
+    return {
+        "weekly": int(row[0] or 0),
+        "monthly": int(row[1] or 0),
+    }
+
+
 def quotation_trends(user: Dict, period: str = "M") -> pd.DataFrame:
     where = ""
     params: List = []
@@ -3493,6 +3518,11 @@ def render_dashboard(user: Dict) -> None:
         )
         metric_cols[2].metric("Overdue follow-ups", len(overdue))
         metric_cols[3].metric("Outstanding payments", f"${outstanding_total:,.2f}")
+
+        period_counts = quotation_period_counts(user)
+        period_cols = st.columns(2)
+        period_cols[0].metric("Weekly quotations", period_counts.get("weekly", 0))
+        period_cols[1].metric("Monthly quotations", period_counts.get("monthly", 0))
 
         if counts.get("total", 0) == 0:
             st.info(
