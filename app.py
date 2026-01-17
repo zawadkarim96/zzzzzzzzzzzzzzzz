@@ -1138,6 +1138,10 @@ CREATE TABLE IF NOT EXISTS customer_documents (
     original_name TEXT,
     uploaded_by INTEGER,
     uploaded_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    updated_by INTEGER,
+    deleted_at TEXT,
+    deleted_by INTEGER,
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE,
     FOREIGN KEY(uploaded_by) REFERENCES users(user_id) ON DELETE SET NULL
 );
@@ -1407,6 +1411,10 @@ def ensure_schema_upgrades(conn):
     add_column("operations_other_documents", "updated_by", "INTEGER")
     add_column("operations_other_documents", "deleted_at", "TEXT")
     add_column("operations_other_documents", "deleted_by", "INTEGER")
+    add_column("customer_documents", "updated_at", "TEXT DEFAULT (datetime('now'))")
+    add_column("customer_documents", "updated_by", "INTEGER")
+    add_column("customer_documents", "deleted_at", "TEXT")
+    add_column("customer_documents", "deleted_by", "INTEGER")
     add_column("import_history", "amount_spent", "REAL")
     add_column("import_history", "imported_by", "INTEGER")
     add_column("import_history", "delivery_address", "TEXT")
@@ -8613,6 +8621,89 @@ def dashboard(conn):
                 )
                 st.dataframe(formatted_ops, use_container_width=True)
 
+            deleted_documents = df_query(
+                conn,
+                """
+                SELECT d.document_id,
+                       d.customer_id,
+                       COALESCE(c.name, c.company_name, '(customer)') AS customer,
+                       d.doc_type,
+                       d.original_name,
+                       d.file_path,
+                       d.uploaded_at,
+                       d.deleted_at,
+                       d.deleted_by,
+                       u.username AS deleted_by_name
+                FROM customer_documents d
+                LEFT JOIN customers c ON c.customer_id = d.customer_id
+                LEFT JOIN users u ON u.user_id = d.deleted_by
+                WHERE d.deleted_at IS NOT NULL
+                ORDER BY datetime(d.deleted_at) DESC
+                """,
+            )
+            if deleted_documents.empty:
+                st.caption("No deleted operations documents found.")
+            else:
+                formatted_docs = fmt_dates(deleted_documents, ["uploaded_at", "deleted_at"])
+                st.markdown("#### Deleted operations documents")
+                docs_bytes = io.BytesIO()
+                with pd.ExcelWriter(docs_bytes, engine="openpyxl") as writer:
+                    formatted_docs.to_excel(
+                        writer, index=False, sheet_name="deleted_documents"
+                    )
+                docs_bytes.seek(0)
+                st.download_button(
+                    "Download deleted operations documents",
+                    docs_bytes.getvalue(),
+                    file_name="deleted_operations_documents.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="deleted_ops_docs_dl",
+                )
+                st.dataframe(formatted_docs, use_container_width=True)
+
+            deleted_other_docs = df_query(
+                conn,
+                """
+                SELECT o.document_id,
+                       o.customer_id,
+                       COALESCE(c.name, c.company_name, '(customer)') AS customer,
+                       o.description,
+                       o.original_name,
+                       o.file_path,
+                       o.uploaded_at,
+                       o.updated_at,
+                       o.deleted_at,
+                       o.deleted_by,
+                       u.username AS deleted_by_name
+                FROM operations_other_documents o
+                LEFT JOIN customers c ON c.customer_id = o.customer_id
+                LEFT JOIN users u ON u.user_id = o.deleted_by
+                WHERE o.deleted_at IS NOT NULL
+                ORDER BY datetime(o.deleted_at) DESC
+                """,
+            )
+            if deleted_other_docs.empty:
+                st.caption("No deleted other operations uploads found.")
+            else:
+                formatted_other_docs = fmt_dates(
+                    deleted_other_docs, ["uploaded_at", "updated_at", "deleted_at"]
+                )
+                st.markdown("#### Deleted other operations uploads")
+                other_docs_bytes = io.BytesIO()
+                with pd.ExcelWriter(other_docs_bytes, engine="openpyxl") as writer:
+                    formatted_other_docs.to_excel(
+                        writer, index=False, sheet_name="deleted_other_uploads"
+                    )
+                other_docs_bytes.seek(0)
+                st.download_button(
+                    "Download deleted other operations uploads",
+                    other_docs_bytes.getvalue(),
+                    file_name="deleted_other_operations_uploads.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="deleted_other_ops_docs_dl",
+                )
+                st.dataframe(formatted_other_docs, use_container_width=True)
+
     def _resolve_recent_pdf_bytes(path_value: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
         clean_path = clean_text(path_value)
         if not clean_path:
@@ -9647,7 +9738,7 @@ def render_customer_quick_edit_section(
             f"""
             SELECT customer_id, doc_type, file_path, original_name, uploaded_at
             FROM customer_documents
-            WHERE customer_id IN ({placeholders})
+            WHERE customer_id IN ({placeholders}) AND deleted_at IS NULL
             ORDER BY datetime(uploaded_at) DESC, document_id DESC
             """,
             tuple(customer_ids),
@@ -11296,6 +11387,7 @@ def render_customer_document_uploader(
         SELECT document_id, doc_type, file_path, original_name, uploaded_at
         FROM customer_documents
         WHERE customer_id=?
+          AND deleted_at IS NULL
         ORDER BY datetime(uploaded_at) DESC, document_id DESC
         """,
         (int(selected_customer),),
@@ -11583,6 +11675,7 @@ def render_operations_document_uploader(
         SELECT document_id, doc_type, file_path, original_name, uploaded_at, uploaded_by
         FROM customer_documents
         WHERE customer_id=?
+          AND deleted_at IS NULL
         ORDER BY datetime(uploaded_at) DESC, document_id DESC
         """,
         (int(selected_customer),),
@@ -11711,11 +11804,7 @@ def render_operations_document_uploader(
                 key=f"{key_prefix}_doc_download_{int(selected_doc_id)}",
             )
         actor_id = current_user_id()
-        is_admin = current_user_is_admin()
-        can_edit = is_admin or (
-            actor_id is not None
-            and int_or_none(selected_doc.get("uploaded_by")) == int(actor_id)
-        )
+        can_edit = actor_id is not None
         delivery_record = None
         delivery_items_df = None
         delivery_doc_type = clean_text(selected_doc.get("doc_type"))
@@ -11830,7 +11919,7 @@ def render_operations_document_uploader(
 
         if save_doc_changes:
             if not can_edit:
-                st.error("Only admins or the original uploader can edit this document.")
+                st.error("Only staff members can edit this document.")
                 return
             stored_path = clean_text(selected_doc.get("file_path"))
             original_name = clean_text(selected_doc.get("original_name"))
@@ -11870,13 +11959,16 @@ def render_operations_document_uploader(
                 UPDATE customer_documents
                 SET doc_type=?,
                     file_path=?,
-                    original_name=?
+                    original_name=?,
+                    updated_at=datetime('now'),
+                    updated_by=?
                 WHERE document_id=?
                 """,
                 (
                     doc_type_choice,
                     stored_path,
                     original_name,
+                    actor_id,
                     int(selected_doc_id),
                 ),
             )
@@ -11952,17 +12044,19 @@ def render_operations_document_uploader(
             key=f"{key_prefix}_doc_delete_button",
         ):
             if not can_edit:
-                st.error("Only admins or the original uploader can delete this document.")
+                st.error("Only staff members can delete this document.")
                 return
-            delete_path = resolve_upload_path(selected_doc.get("file_path"))
             conn.execute(
-                "DELETE FROM customer_documents WHERE document_id=?",
-                (int(selected_doc_id),),
+                """
+                UPDATE customer_documents
+                SET deleted_at=datetime('now'),
+                    deleted_by=?
+                WHERE document_id=?
+                  AND deleted_at IS NULL
+                """,
+                (actor_id, int(selected_doc_id)),
             )
             conn.commit()
-            if delete_path and delete_path.exists():
-                with contextlib.suppress(OSError):
-                    delete_path.unlink()
             log_activity(
                 conn,
                 event_type="customer_document_deleted",
@@ -12068,11 +12162,7 @@ def render_operations_document_uploader(
             axis=1,
         )
         actor_id = current_user_id()
-        is_admin = current_user_is_admin()
-        can_edit = is_admin or (
-            actor_id is not None
-            and int_or_none(selected_other.get("uploaded_by")) == int(actor_id)
-        )
+        can_edit = actor_id is not None
         with st.form(f"{key_prefix}_other_edit_form_inline"):
             description_input = st.text_area(
                 "Description",
@@ -12108,7 +12198,7 @@ def render_operations_document_uploader(
 
         if save_changes:
             if not can_edit:
-                st.error("Only admins or the original uploader can edit this record.")
+                st.error("Only staff members can edit this record.")
                 return
             items_records = (
                 edited_items.to_dict("records")
@@ -12182,7 +12272,7 @@ def render_operations_document_uploader(
             key=f"{key_prefix}_other_delete_button_inline",
         ):
             if not can_edit:
-                st.error("Only admins or the original uploader can delete this record.")
+                st.error("Only staff members can delete this record.")
                 return
             conn.execute(
                 """
@@ -12379,11 +12469,7 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
         axis=1,
     )
     actor_id = current_user_id()
-    is_admin = current_user_is_admin()
-    can_edit = is_admin or (
-        actor_id is not None
-        and int_or_none(selected_record.get("uploaded_by")) == int(actor_id)
-    )
+    can_edit = actor_id is not None
     with st.form(f"{key_prefix}_other_edit_form"):
         description_input = st.text_area(
             "Description",
@@ -12417,7 +12503,7 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
 
     if save_changes:
         if not can_edit:
-            st.error("Only admins or the original uploader can edit this record.")
+            st.error("Only staff members can edit this record.")
             return
         items_records = (
             edited_items.to_dict("records") if isinstance(edited_items, pd.DataFrame) else []
@@ -12490,7 +12576,7 @@ def _render_operations_other_manager(conn, *, key_prefix: str) -> None:
         key=f"{key_prefix}_other_delete_button",
     ):
         if not can_delete:
-            st.error("Only admins or the original uploader can delete this record.")
+            st.error("Only staff members can delete this record.")
             return
         conn.execute(
             """
@@ -18864,6 +18950,7 @@ def customer_summary_page(conn):
         SELECT document_id, customer_id, doc_type, file_path, original_name, uploaded_at
         FROM customer_documents
         WHERE customer_id IN ({placeholders})
+          AND deleted_at IS NULL
         ORDER BY datetime(uploaded_at) DESC, document_id DESC
         """,
         ids,
