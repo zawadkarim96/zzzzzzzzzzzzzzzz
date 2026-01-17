@@ -2749,28 +2749,6 @@ def _build_staff_alerts(conn, *, user_id: Optional[int]) -> list[dict[str, objec
         for _, reminder in follow_up_reminders[:12]:
             alerts.append(reminder)
 
-    pending_report = df_query(
-        conn,
-        dedent(
-            """
-            SELECT 1 FROM work_reports
-            WHERE user_id=?
-              AND period_type='daily'
-              AND date(period_start)=date(?)
-            LIMIT 1
-            """
-        ),
-        (user_id, today_iso),
-    )
-    if pending_report.empty:
-        alerts.append(
-            {
-                "title": "Daily report due",
-                "message": f"Submit today's update ({format_period_range(today_iso, today_iso)}).",
-                "severity": "warning",
-            }
-        )
-
     return alerts
 
 
@@ -7599,6 +7577,9 @@ def dashboard(conn):
                 or "—",
                 axis=1,
             )
+            staff_sales_df["Sales date"] = pd.to_datetime(
+                staff_sales_df["created_at"], errors="coerce"
+            ).dt.date
             staff_sales_df["When"] = staff_sales_df["created_at"].apply(
                 lambda value: format_time_ago(value) or format_period_range(value, value)
             )
@@ -7609,7 +7590,16 @@ def dashboard(conn):
             )
             sales_frames.append(
                 staff_sales_df[
-                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                    [
+                        "Reference",
+                        "customer",
+                        "Products",
+                        "Sales date",
+                        "Total (BDT)",
+                        "Status",
+                        "When",
+                        "sort_date",
+                    ]
                 ].rename(columns={"customer": "Customer"})
             )
 
@@ -7627,6 +7617,9 @@ def dashboard(conn):
                 or "—",
                 axis=1,
             )
+            staff_service_df["Sales date"] = pd.to_datetime(
+                staff_service_df["updated_at"], errors="coerce"
+            ).dt.date
             staff_service_df["When"] = staff_service_df["updated_at"].apply(
                 lambda value: format_time_ago(value) or format_period_range(value, value)
             )
@@ -7637,7 +7630,16 @@ def dashboard(conn):
             )
             sales_frames.append(
                 staff_service_df[
-                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                    [
+                        "Reference",
+                        "customer",
+                        "Products",
+                        "Sales date",
+                        "Total (BDT)",
+                        "Status",
+                        "When",
+                        "sort_date",
+                    ]
                 ].rename(columns={"customer": "Customer"})
             )
 
@@ -7655,6 +7657,9 @@ def dashboard(conn):
                 or "—",
                 axis=1,
             )
+            staff_maintenance_df["Sales date"] = pd.to_datetime(
+                staff_maintenance_df["updated_at"], errors="coerce"
+            ).dt.date
             staff_maintenance_df["When"] = staff_maintenance_df["updated_at"].apply(
                 lambda value: format_time_ago(value) or format_period_range(value, value)
             )
@@ -7669,7 +7674,16 @@ def dashboard(conn):
             )
             sales_frames.append(
                 staff_maintenance_df[
-                    ["Reference", "customer", "Products", "Total (BDT)", "Status", "When", "sort_date"]
+                    [
+                        "Reference",
+                        "customer",
+                        "Products",
+                        "Sales date",
+                        "Total (BDT)",
+                        "Status",
+                        "When",
+                        "sort_date",
+                    ]
                 ].rename(columns={"customer": "Customer"})
             )
 
@@ -7683,7 +7697,15 @@ def dashboard(conn):
             )
             st.dataframe(
                 sales_snapshot[
-                    ["Reference", "Customer", "Products", "Total (BDT)", "Status", "When"]
+                    [
+                        "Reference",
+                        "Customer",
+                        "Products",
+                        "Sales date",
+                        "Total (BDT)",
+                        "Status",
+                        "When",
+                    ]
                 ].rename(
                     columns={"Reference": "DO/Work No./Service/Maintenance"}
                 ),
@@ -8246,26 +8268,28 @@ def dashboard(conn):
         ),
         quote_params,
     )
-    if not quotes_df.empty:
-        st.markdown("#### Quotation insights")
-        if quote_metrics.empty:
-            total_quotes = 0
-            weekly_quotes = 0
-            monthly_quotes = 0
-            paid_quotes = 0
-        else:
-            total_quotes = int(quote_metrics.iloc[0].get("total_quotes") or 0)
-            weekly_quotes = int(quote_metrics.iloc[0].get("weekly_quotes") or 0)
-            monthly_quotes = int(quote_metrics.iloc[0].get("monthly_quotes") or 0)
-            paid_quotes = int(quote_metrics.iloc[0].get("paid_quotes") or 0)
-        conversion = (paid_quotes / total_quotes) * 100 if total_quotes else 0.0
-        metrics_cols = st.columns(5)
-        metrics_cols[0].metric("Quotations created", total_quotes)
-        metrics_cols[1].metric("Weekly quotations", weekly_quotes)
-        metrics_cols[2].metric("Monthly quotations", monthly_quotes)
-        metrics_cols[3].metric("Paid / converted", paid_quotes)
-        metrics_cols[4].metric("Conversion rate", f"{conversion:.1f}%")
+    st.markdown("#### Quotation insights")
+    if quote_metrics.empty:
+        total_quotes = 0
+        weekly_quotes = 0
+        monthly_quotes = 0
+        paid_quotes = 0
+    else:
+        total_quotes = int(quote_metrics.iloc[0].get("total_quotes") or 0)
+        weekly_quotes = int(quote_metrics.iloc[0].get("weekly_quotes") or 0)
+        monthly_quotes = int(quote_metrics.iloc[0].get("monthly_quotes") or 0)
+        paid_quotes = int(quote_metrics.iloc[0].get("paid_quotes") or 0)
+    conversion = (paid_quotes / total_quotes) * 100 if total_quotes else 0.0
+    metrics_cols = st.columns(5)
+    metrics_cols[0].metric("Quotations created", total_quotes)
+    metrics_cols[1].metric("Weekly quotations", weekly_quotes)
+    metrics_cols[2].metric("Monthly quotations", monthly_quotes)
+    metrics_cols[3].metric("Paid / converted", paid_quotes)
+    metrics_cols[4].metric("Conversion rate", f"{conversion:.1f}%")
 
+    if quotes_df.empty:
+        st.info("No quotations available for the selected scope yet.")
+    else:
         quotes_df = fmt_dates(quotes_df, ["quote_date"])
         quotes_df["customer"] = quotes_df["customer"].apply(
             lambda value: clean_text(value) or "—"
@@ -8729,9 +8753,13 @@ def dashboard(conn):
                 st.info("All selected months currently show zero scheduled expiries.")
 
     with tab2:
+        show_all_services = st.checkbox(
+            "Show all services", key="dashboard_services_show_all"
+        )
+        services_limit = "" if show_all_services else "LIMIT 200"
         recent_services = df_query(
             conn,
-            """
+            f"""
             SELECT s.do_number,
                    s.customer_id,
                    d.customer_id AS do_customer_id,
@@ -8744,7 +8772,7 @@ def dashboard(conn):
             LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
             WHERE s.deleted_at IS NULL
             ORDER BY datetime(s.service_date) DESC, s.service_id DESC
-            LIMIT 10
+            {services_limit}
             """,
         )
         if allowed_customers is not None:
@@ -8776,12 +8804,17 @@ def dashboard(conn):
                 }
             ).drop(columns=["customer_id", "do_customer_id"], errors="ignore"),
             use_container_width=True,
+            height=320,
         )
 
     with tab3:
+        show_all_maintenance = st.checkbox(
+            "Show all maintenance records", key="dashboard_maintenance_show_all"
+        )
+        maintenance_limit = "" if show_all_maintenance else "LIMIT 200"
         recent_maintenance = df_query(
             conn,
-            """
+            f"""
             SELECT m.do_number,
                    m.customer_id,
                    d.customer_id AS do_customer_id,
@@ -8794,7 +8827,7 @@ def dashboard(conn):
             LEFT JOIN customers cdo ON cdo.customer_id = d.customer_id
             WHERE m.deleted_at IS NULL
             ORDER BY datetime(m.maintenance_date) DESC, m.maintenance_id DESC
-            LIMIT 10
+            {maintenance_limit}
             """,
         )
         if allowed_customers is not None:
@@ -8826,12 +8859,17 @@ def dashboard(conn):
                 }
             ).drop(columns=["customer_id", "do_customer_id"], errors="ignore"),
             use_container_width=True,
+            height=320,
         )
 
     with tab4:
+        show_all_delivery = st.checkbox(
+            "Show all delivery orders", key="dashboard_delivery_show_all"
+        )
+        delivery_limit = "" if show_all_delivery else "LIMIT 200"
         recent_delivery_orders = df_query(
             conn,
-            """
+            f"""
             SELECT d.do_number,
                    d.customer_id,
                    d.created_at,
@@ -8846,7 +8884,7 @@ def dashboard(conn):
             WHERE d.deleted_at IS NULL
               AND COALESCE(d.record_type, 'delivery_order') = 'delivery_order'
             ORDER BY datetime(d.created_at) DESC
-            LIMIT 10
+            {delivery_limit}
             """,
         )
         if allowed_customers is not None:
@@ -8880,6 +8918,7 @@ def dashboard(conn):
                     errors="ignore",
                 ),
                 use_container_width=True,
+                height=320,
             )
             _render_recent_pdf_downloads(
                 "Delivery order",
@@ -8888,9 +8927,13 @@ def dashboard(conn):
             )
 
     with tab5:
+        show_all_work = st.checkbox(
+            "Show all work orders", key="dashboard_work_show_all"
+        )
+        work_limit = "" if show_all_work else "LIMIT 200"
         recent_work_orders = df_query(
             conn,
-            """
+            f"""
             SELECT d.do_number,
                    d.customer_id,
                    d.created_at,
@@ -8905,7 +8948,7 @@ def dashboard(conn):
             WHERE d.deleted_at IS NULL
               AND COALESCE(d.record_type, 'delivery_order') = 'work_done'
             ORDER BY datetime(d.created_at) DESC
-            LIMIT 10
+            {work_limit}
             """,
         )
         if allowed_customers is not None:
@@ -8937,6 +8980,7 @@ def dashboard(conn):
                     errors="ignore",
                 ),
                 use_container_width=True,
+                height=320,
             )
             _render_recent_pdf_downloads(
                 "Work order",
@@ -12477,6 +12521,41 @@ def operations_page(conn):
         "Review delivery orders, work done, service, maintenance, and other operational records in one place."
     )
     render_operations_document_uploader(conn, key_prefix="operations_page")
+
+    st.markdown("---")
+    tabs = st.tabs(
+        [
+            "Delivery orders",
+            "Work done",
+            "Service",
+            "Maintenance",
+            "Other uploads",
+        ]
+    )
+    with tabs[0]:
+        st.markdown("### Delivery orders")
+        delivery_orders_page(
+            conn,
+            show_heading=False,
+            record_type_label="Delivery order",
+            record_type_key="delivery_order",
+        )
+    with tabs[1]:
+        st.markdown("### Work done")
+        delivery_orders_page(
+            conn,
+            show_heading=False,
+            record_type_label="Work done",
+            record_type_key="work_done",
+        )
+    with tabs[2]:
+        st.markdown("### Service records")
+        _render_service_section(conn, show_heading=False)
+    with tabs[3]:
+        st.markdown("### Maintenance records")
+        _render_maintenance_section(conn, show_heading=False)
+    with tabs[4]:
+        _render_operations_other_manager(conn, key_prefix="operations_page")
 
     if current_user_is_admin():
         with st.expander("Admin activity log", expanded=False):
